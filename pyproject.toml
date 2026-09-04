@@ -7,7 +7,7 @@ name = "qwen-contextual-compression"
 version = "0.1.0"
 description = "Oracle contextual FFN sparsity experiments"
 requires-python = ">=3.10"
-dependencies = ["torch>=2.2", "transformers>=4.57", "accelerate>=1.0", "numpy>=1.24", "pandas>=2", "matplotlib>=3.7", "pyyaml>=6"]
+dependencies = ["torch>=2.2", "transformers>=4.57", "accelerate>=1.0", "huggingface-hub>=0.34", "safetensors>=0.4", "numpy>=1.24", "pandas>=2", "matplotlib>=3.7", "pyyaml>=6"]
 
 [project.optional-dependencies]
 datasets = ["datasets>=3"]
@@ -18,4 +18,3 @@ include = ["extract*", "oracle*", "evaluation*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-

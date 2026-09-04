@@ -18,6 +18,10 @@ DEFAULT_PROMPTS = [
 ]
 
 
+class _PartialForwardComplete(Exception):
+    """Internal control flow used after the selected official MLP has executed."""
+
+
 class ActivationShardWriter:
     def __init__(self, output_dir: Path, shard_size: int, storage_dtype: torch.dtype):
         self.output_dir, self.shard_size, self.storage_dtype = output_dir, shard_size, storage_dtype
@@ -53,6 +57,11 @@ def capture(model, tokenizer, layer_index: int, prompts: list[str], output_dir: 
         remaining = max_tokens - writer.count
         writer.add(hidden[mask][:remaining], ids[mask][:remaining])
     handle = ffn.module.register_forward_pre_hook(hook)
+    stop_handle = None
+    if getattr(model, "_is_selectively_loaded", False):
+        def stop_after_official_mlp(_module, _args, _output):
+            raise _PartialForwardComplete
+        stop_handle = ffn.module.register_forward_hook(stop_after_official_mlp)
     try:
         with torch.inference_mode():
             for start in range(0, len(prompts), batch_size):
@@ -61,13 +70,23 @@ def capture(model, tokenizer, layer_index: int, prompts: list[str], output_dir: 
                 device = model.get_input_embeddings().weight.device
                 encoded = {k: v.to(device) for k, v in encoded.items()}; pending_ids[:] = [encoded["input_ids"]]
                 pending_attention[:] = [encoded.get("attention_mask", torch.ones_like(encoded["input_ids"]))]
-                model(**encoded, use_cache=False)
+                if stop_handle is None:
+                    model(**encoded, use_cache=False)
+                else:
+                    try:
+                        model(**encoded, use_cache=False)
+                    except _PartialForwardComplete:
+                        pass
                 if writer.count >= max_tokens: break
-    finally: handle.remove(); writer.flush()
+    finally:
+        handle.remove()
+        if stop_handle is not None: stop_handle.remove()
+        writer.flush()
     meta = {"model": model_name, "revision": revision, "selected_layer": layer_index,
             "dtype": str(storage_dtype), "hidden_size": ffn.gate_proj.weight.shape[1],
             "captured_vectors": writer.count, "source_prompts": prompts,
             "tokenizer": type(tokenizer).__name__, "exclude_special": exclude_special,
-            "timestamp": datetime.now(timezone.utc).isoformat(), "seed": seed, "shards": writer.index}
+            "timestamp": datetime.now(timezone.utc).isoformat(), "seed": seed, "shards": writer.index,
+            "selective_weight_shards": list(getattr(getattr(model, "_selective_load_plan", None), "shard_names", ())) }
     (output_dir / "metadata.json").write_text(json.dumps(meta, indent=2) + "\n")
     return meta

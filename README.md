@@ -15,6 +15,14 @@ y = down_proj(a)
 
 For selected neuron `j`, a perfect pre-FFN selector needs row `j` of both input projections and column `j` of the down projection. Thus exact accounting is `K*(gate_in + up_in + down_out)` weights, plus any biases. With conventional equal-width gate/up matrices this is exactly proportional to `K/N` for projection weights; the implementation validates dimensions rather than assuming that result.
 
+## Selective checkpoint loading (default)
+
+The initial experiment does **not** download the complete 27B checkpoint. The loader downloads `model.safetensors.index.json`, discovers the language embedding tensor and every tensor under the selected `layers.N` prefix, and asks `huggingface_hub` for only the unique shards named by those entries. Shard numbers are never hard-coded. For the currently published layer-0 index this is expected to resolve the embedding and layer-0 shards, but the downloaded filenames printed by inspection are the source of truth.
+
+Transformers builds the official causal-LM architecture on the `meta` device, after which only selected tensors are materialized. The loader calls the official selected MLP and compares it with the independent explicit gated-FFN equation before returning. During partial activation capture, the official model executes embeddings, layer-0 attention/DeltaNet, normalization, and its MLP; a targeted post-hook then stops execution before an unloaded later layer is reached.
+
+Pass `--full-model` to use normal `from_pretrained()` as an explicit fallback. Only that mode applies Accelerate `--device-map` and `--offload-folder`; selective mode places its small materialized subset on `--device` (or CUDA when available, otherwise CPU). `--cache-dir`, `--revision`, and `--trust-remote-code` are supported in both relevant paths.
+
 ## Install and test
 
 ```bash
@@ -35,6 +43,10 @@ python scripts/run_oracle_sweep.py --model Qwen/Qwen3.8-27B --layer 0 \
   --retention 1.0,0.75,0.5,0.4,0.3,0.25,0.2,0.15,0.1,0.05
 python scripts/analyse_results.py --results-dir results/layer0
 ```
+
+The first command prints `downloaded_shards`; use that field to audit that only
+the dynamically selected files were fetched. To deliberately fetch and dispatch
+the entire checkpoint instead, append `--full-model --device-map auto`.
 
 The scripts accept Accelerate `--device-map` and `--offload-folder`, dtype and batch controls. Unknown arguments are ignored so Jupyter's injected `-f kernel.json` is harmless. In Colab, prefix commands with `!`. Activation inputs are written incrementally as bounded `.pt` shards; sweeps load and process one batch at a time. A TXT file supplies one prompt per line; JSONL accepts `text` or `prompt`. Special tokens are excluded by default.
 

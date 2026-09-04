@@ -2,6 +2,8 @@ model: Qwen/Qwen3.8-27B
 layer: 0
 dtype: bfloat16
 device_map: auto
+device: auto
+full_model: false
 seed: 42
 batch_size: 1
 max_tokens: 10000
@@ -10,4 +12,3 @@ retention: [1.0, 0.9, 0.75, 0.6, 0.5, 0.4, 0.3, 0.25, 0.2, 0.15, 0.1, 0.05]
 importance: weighted_activation
 block_sizes: [32, 64, 128, 256]
 random_repeats: 3
-
