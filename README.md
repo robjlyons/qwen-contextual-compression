@@ -57,3 +57,28 @@ Outputs include `oracle.csv`, `summary.csv`, `neuron_stats.csv`, `hot_coverage.c
 ## Interpretation
 
 `theoretical_weight_traffic_fraction` is the ideal projection-weight subset a perfect advance selector could request. `actual_oracle_executes_dense_gate_up=true` records the crucial fact that the current PyTorch oracle accesses dense gate/up weights and should never be presented as a benchmark or speedup. Output similarity is layer-local; corpus diversity, end-to-end perplexity/generation, predictor cost, and sparse-hardware efficiency remain future validation work. See [FUTURE_WORK.md](FUTURE_WORK.md).
+
+## Phase 2: co-activation neuron layouts
+
+The layout experiment reuses Phase-1 `inputs_*.pt` shards. It packs oracle masks
+neuron-major (one bit per token), learns all orderings from the calibration prefix,
+and evaluates reconstruction only on the held-out validation suffix. Its sparse
+graph uses random-projection selection signatures to propose bounded candidate
+neighbours, then computes exact Jaccard/cosine/conditional/raw/NPMI affinity only
+for those candidates. It never allocates a dense 17,408-by-17,408 matrix.
+
+```bash
+python scripts/build_coactivation.py --activation-dir results/layer0 \
+  --retention 0.20,0.30,0.40,0.50 --clustering-retention 0.40
+python scripts/cluster_neurons.py --clustering-dir results/layer0/clustering
+python scripts/run_permuted_block_sweep.py --activation-dir results/layer0 \
+  --clustering-dir results/layer0/clustering \
+  --retention 0.30,0.40,0.50 --block-sizes 16,32,64,128
+python scripts/analyse_permutation.py --clustering-dir results/layer0/clustering
+```
+
+The sweep reports both equal-neuron-budget and equal-oracle-coverage modes. The
+generated report includes tail metrics, paired bootstrap confidence intervals,
+dense permutation validation, locality plots, and an automatically thresholded
+Outcome A/B/C. Reordering itself never changes the dense mathematical function:
+gate/up rows, their biases, and down columns are transformed consistently.
