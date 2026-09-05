@@ -22,7 +22,7 @@ def load_model(name: str, dtype: str = "bfloat16", device_map: str | None = "aut
         return load_selective_model(name, layer, selected_dtype, device, revision, cache_dir, token,
                                     trust_remote_code)
     from transformers import AutoModelForCausalLM
-    kwargs = {"torch_dtype": DTYPES[dtype], "revision": revision, "low_cpu_mem_usage": True,
+    kwargs = {"dtype": DTYPES[dtype], "revision": revision, "low_cpu_mem_usage": True,
               "cache_dir": cache_dir, "token": token, "trust_remote_code": trust_remote_code}
     if device_map and device_map != "none": kwargs["device_map"] = device_map
     if offload_folder:

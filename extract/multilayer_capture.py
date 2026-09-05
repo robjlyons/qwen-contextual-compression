@@ -39,13 +39,22 @@ def load_corpus(path: Path | None = None, dataset: str | None = None,
             rows.append({"text":str(item[text_field]),"category":str(item.get(category_field,"unknown")),"source":dataset})
         return rows
     if path is None: return [dict(row) for row in BUILTIN_CORPUS]
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Calibration corpus does not exist: {path}. This check is performed "
+            "before loading Qwen weights. Omit --input to use the small built-in "
+            "smoke-test corpus, or provide an existing TXT/JSONL path."
+        )
     if path.suffix.lower()==".jsonl":
         rows=[]
         for line in path.read_text().splitlines():
             if not line.strip(): continue
             item=json.loads(line); rows.append({"text":str(item[text_field]),"category":str(item.get(category_field,"unknown")),"source":str(item.get("source",path.name))})
+        if not rows: raise ValueError(f"Calibration JSONL contains no usable rows: {path}")
         return rows
-    return [{"text":line,"category":"unknown","source":path.name} for line in path.read_text().splitlines() if line.strip()]
+    rows=[{"text":line,"category":"unknown","source":path.name} for line in path.read_text().splitlines() if line.strip()]
+    if not rows: raise ValueError(f"Calibration text file contains no non-empty lines: {path}")
+    return rows
 
 
 def mixer_type(layer: torch.nn.Module, config=None, layer_index: int | None=None) -> str:

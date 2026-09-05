@@ -13,7 +13,9 @@ def _fixed(summary,metric,ratio):
     data=summary[np.isclose(summary.retention,ratio)].set_index("layer"); return data[metric]
 
 def analyse_multilayer(results_dir:Path,min_report_samples:int=1000,bootstrap_resamples:int=500)->str:
-    metadata=json.loads((results_dir/"metadata.json").read_text()); oracle_dir=results_dir/"oracle"
+    metadata_path=results_dir/"metadata.json"
+    if not metadata_path.is_file(): raise FileNotFoundError(f"Multi-layer capture is incomplete: missing {metadata_path}. Run capture and oracle evaluation successfully before analysis.")
+    metadata=json.loads(metadata_path.read_text()); oracle_dir=results_dir/"oracle"
     files=sorted(oracle_dir.glob("layer_*.csv"))
     if not files: raise FileNotFoundError(f"No layer_*.csv oracle results found in {oracle_dir}")
     rows=pd.concat([pd.read_csv(path) for path in files],ignore_index=True); samples=pd.read_json(results_dir/"samples.jsonl",lines=True); rows=rows.merge(samples,on=["sample_id","prompt_id","token_position","token_id"],how="left",validate="many_to_one")

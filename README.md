@@ -105,7 +105,7 @@ python scripts/capture_multilayer_activations.py \
   --model Qwen/Qwen3.8-27B \
   --layers 0,8,16,24,32,40,48,56,63 \
   --max-tokens-per-layer 2000 \
-  --input calibration.jsonl \
+  --input /path/to/your/calibration.jsonl \
   --device-map auto --offload-folder offload/qwen38 \
   --output-dir results/multilayer
 
@@ -120,9 +120,13 @@ python scripts/analyse_multilayer_results.py \
   --results-dir results/multilayer --min-report-samples 1000
 ```
 
-Supply `--input corpus.jsonl` (fields `text`, optional `category` and `source`)
+Supply an **existing** `--input corpus.jsonl` (fields `text`, optional `category` and `source`)
 or `--dataset NAME --text-field text --category-field category`. The bundled
 category-balanced prompts are a smoke test, not enough for a verified conclusion.
+Corpus existence and content are validated before the full checkpoint is loaded,
+so a path typo cannot trigger a 55 GB download before failing. Omit `--input` for
+the built-in smoke test; it will correctly produce a `PRELIMINARY` report rather
+than pretending to contain 2,000 tokens.
 Use `--all-layers` after representative-layer validation. If the detected model
 does not have 64 layers, the default representative indices are adjusted and
 recorded rather than silently indexing invalid layers.
@@ -133,5 +137,6 @@ arguments are ignored. The one-command resumable wrapper is:
 
 ```bash
 python scripts/run_multilayer_experiment.py --max-tokens-per-layer 2000 \
+  --input /path/to/your/calibration.jsonl \
   --offload-folder offload/qwen38 --output-dir results/multilayer
 ```

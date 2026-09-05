@@ -7,7 +7,7 @@ from torch import nn
 from conftest import TinyFFN
 from evaluation.multilayer_metrics import adjacent_pair_indices,bootstrap_intervals,minimum_retention,threshold_table
 from extract.extract_ffn import explicit_dense_ffn,locate_ffn
-from extract.multilayer_capture import mixer_type,validate_layer_sample_alignment
+from extract.multilayer_capture import load_corpus,mixer_type,validate_layer_sample_alignment
 
 class DeltaLayer(nn.Module):
  def __init__(self): super().__init__();self.linear_attn=nn.Identity();self.mlp=TinyFFN()
@@ -47,3 +47,8 @@ def test_bootstrap_ci_contains_constant_synthetic_mean():
 
 def test_adjacent_matching_never_crosses_prompt_boundaries():
  pairs=adjacent_pair_indices([0,0,1,1,0],[4,5,0,1,9]);assert pairs==[(0,1),(2,3)]
+
+def test_missing_corpus_fails_before_model_loading(tmp_path):
+ try: load_corpus(tmp_path/"does-not-exist.jsonl")
+ except FileNotFoundError as error: assert "before loading Qwen weights" in str(error)
+ else: raise AssertionError("missing calibration corpus was accepted")
