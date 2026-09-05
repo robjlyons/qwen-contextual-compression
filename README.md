@@ -82,3 +82,56 @@ generated report includes tail metrics, paired bootstrap confidence intervals,
 dense permutation validation, locality plots, and an automatically thresholded
 Outcome A/B/C. Reordering itself never changes the dense mathematical function:
 gate/up rows, their biases, and down columns are transformed consistently.
+
+## Multi-layer oracle validation
+
+Deeper hidden states must come from a mathematically valid pass through every
+preceding hybrid layer. The reference capture therefore uses one normal official
+Transformers forward with simultaneous MLP pre-hooks and requires the full model,
+normally dispatched with Accelerate CPU/disk offload. It does not approximate or
+independently reimplement attention, Gated DeltaNet state, masks, or positions.
+After capture, the oracle command materializes only one selected FFN at a time.
+
+The same stable `sample_id` identifies a prompt/token position in every layer.
+One prompt is committed per shard and capture state is updated atomically, making
+capture resumable. The default 2,000-token, nine-layer FP16/BF16 activation payload
+is about 175.8 MiB; 10,000 tokens are about 878.9 MiB, before small metadata and
+container overhead.
+
+First 2,000-token experiment:
+
+```bash
+python scripts/capture_multilayer_activations.py \
+  --model Qwen/Qwen3.8-27B \
+  --layers 0,8,16,24,32,40,48,56,63 \
+  --max-tokens-per-layer 2000 \
+  --input calibration.jsonl \
+  --device-map auto --offload-folder offload/qwen38 \
+  --output-dir results/multilayer
+
+python scripts/run_multilayer_oracle.py \
+  --model Qwen/Qwen3.8-27B \
+  --activation-dir results/multilayer/activations \
+  --layers 0,8,16,24,32,40,48,56,63 \
+  --retention 0.1,0.2,0.3,0.4,0.5,0.6,0.75,1.0 \
+  --output-dir results/multilayer/oracle
+
+python scripts/analyse_multilayer_results.py \
+  --results-dir results/multilayer --min-report-samples 1000
+```
+
+Supply `--input corpus.jsonl` (fields `text`, optional `category` and `source`)
+or `--dataset NAME --text-field text --category-field category`. The bundled
+category-balanced prompts are a smoke test, not enough for a verified conclusion.
+Use `--all-layers` after representative-layer validation. If the detected model
+does not have 64 layers, the default representative indices are adjusted and
+recorded rather than silently indexing invalid layers.
+
+In Colab the same commands work with `!python`; point `--output-dir` at a mounted
+Google Drive directory if `/content` persistence is insufficient. Unknown kernel
+arguments are ignored. The one-command resumable wrapper is:
+
+```bash
+python scripts/run_multilayer_experiment.py --max-tokens-per-layer 2000 \
+  --offload-folder offload/qwen38 --output-dir results/multilayer
+```
