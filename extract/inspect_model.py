@@ -46,4 +46,5 @@ def inspect(model, layer_index: int) -> dict:
             "model_parameter_count": sum(p.numel() for p in model.parameters()),
             "selective_load": bool(getattr(model, "_is_selectively_loaded", False)),
             "official_mlp_verified": bool(getattr(model, "_selective_mlp_verified", False)),
-            "downloaded_shards": list(getattr(getattr(model, "_selective_load_plan", None), "shard_names", ())) }
+            "downloaded_shards": list(getattr(getattr(model, "_selective_load_plan", None), "shard_names", ())),
+            "checkpoint_name_mapping": getattr(model, "_checkpoint_to_model_names", {})}

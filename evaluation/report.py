@@ -11,6 +11,13 @@ def _minimum_keep(df, column, threshold, greater=True):
 
 
 def analyse(results_dir: Path) -> None:
+    required = [results_dir/"summary.csv", results_dir/"neuron_stats.csv", results_dir/"hot_coverage.csv"]
+    missing = [str(path) for path in required if not path.exists()]
+    if missing:
+        raise FileNotFoundError(
+            "Cannot analyse an incomplete experiment. Run capture_activations.py and "
+            f"run_oracle_sweep.py successfully first. Missing: {', '.join(missing)}"
+        )
     summary=pd.read_csv(results_dir/"summary.csv"); stats=pd.read_csv(results_dir/"neuron_stats.csv")
     coverage=pd.read_csv(results_dir/"hot_coverage.csv"); plots=results_dir/"plots"; plots.mkdir(exist_ok=True)
     oracle=summary[summary.method=="oracle"].sort_values("retention")
@@ -63,4 +70,3 @@ At the lowest measured oracle retention with mean cosine >= .99 ({point.retentio
 - Gated SwiGLU sparsity can differ from ReLU-family sparsity.
 """
     (results_dir/"report.md").write_text(report)
-

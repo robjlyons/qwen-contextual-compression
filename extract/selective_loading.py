@@ -16,7 +16,12 @@ from accelerate.utils import set_module_tensor_to_device
 from huggingface_hub import hf_hub_download
 from safetensors import safe_open
 from transformers import AutoConfig, AutoModelForCausalLM
-from extract.checkpoint_plan import INDEX_FILENAME, SelectivePlan, plan_selective_load
+from extract.checkpoint_plan import (
+    INDEX_FILENAME,
+    SelectivePlan,
+    plan_selective_load,
+    resolve_checkpoint_tensor_names,
+)
 
 
 def _target_device(device: str | None) -> torch.device:
@@ -59,6 +64,8 @@ def load_selective_model(
         model = AutoModelForCausalLM.from_config(config, trust_remote_code=trust_remote_code)
 
     wanted = set(plan.tensor_names)
+    model_state = model.state_dict()
+    checkpoint_to_model = resolve_checkpoint_tensor_names(wanted, model_state.keys())
     loaded: set[str] = set()
     target = _target_device(device)
     for shard_name in plan.shard_names:
@@ -68,9 +75,16 @@ def load_selective_model(
                 if name not in wanted:
                     continue
                 tensor = shard.get_tensor(name)
+                model_name = checkpoint_to_model[name]
+                expected_shape = tuple(model_state[model_name].shape)
+                if tuple(tensor.shape) != expected_shape:
+                    raise RuntimeError(
+                        f"Shape mismatch for {name!r} -> {model_name!r}: checkpoint "
+                        f"{tuple(tensor.shape)}, model {expected_shape}"
+                    )
                 if tensor.is_floating_point():
                     tensor = tensor.to(dtype=dtype)
-                set_module_tensor_to_device(model, name, target, value=tensor)
+                set_module_tensor_to_device(model, model_name, target, value=tensor)
                 loaded.add(name)
     missing = wanted - loaded
     if missing:
@@ -82,12 +96,15 @@ def load_selective_model(
 
     model.eval()
     model._selective_load_plan = plan  # runtime provenance used by inspection/capture
+    model._checkpoint_to_model_names = checkpoint_to_model
     model._is_selectively_loaded = True
     # Validate the materialized MLP against an independent equation before any
     # experiment consumes it.  This calls the official module implementation.
     from extract.extract_ffn import explicit_dense_ffn, locate_ffn
     ffn = locate_ffn(model, layer_index)
-    probe = torch.zeros((1, 1, ffn.gate_proj.weight.shape[1]), device=target, dtype=dtype)
+    probe = torch.linspace(
+        -0.5, 0.5, ffn.gate_proj.weight.shape[1], device=target, dtype=dtype
+    ).reshape(1, 1, -1)
     with torch.inference_mode():
         official = ffn.module(probe)
         explicit = explicit_dense_ffn(probe, ffn)

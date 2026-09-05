@@ -21,6 +21,8 @@ The initial experiment does **not** download the complete 27B checkpoint. The lo
 
 Transformers builds the official causal-LM architecture on the `meta` device, after which only selected tensors are materialized. The loader calls the official selected MLP and compares it with the independent explicit gated-FFN equation before returning. During partial activation capture, the official model executes embeddings, layer-0 attention/DeltaNet, normalization, and its MLP; a targeted post-hook then stops execution before an unloaded later layer is reached.
 
+Checkpoint tensor names and instantiated module names are reconciled explicitly. In particular, a serialized key such as `model.language_model.layers.0...` can map to the text-only Transformers wrapper's `model.layers.0...`. Resolution uses the longest unique dotted suffix, validates tensor shapes before assignment, and fails rather than guessing when a match is missing or ambiguous. Inspection prints the complete mapping for auditability.
+
 Pass `--full-model` to use normal `from_pretrained()` as an explicit fallback. Only that mode applies Accelerate `--device-map` and `--offload-folder`; selective mode places its small materialized subset on `--device` (or CUDA when available, otherwise CPU). `--cache-dir`, `--revision`, and `--trust-remote-code` are supported in both relevant paths.
 
 ## Install and test
