@@ -105,6 +105,7 @@ python scripts/capture_multilayer_activations.py \
   --model Qwen/Qwen3.8-27B \
   --layers 0,8,16,24,32,40,48,56,63 \
   --max-tokens-per-layer 2000 \
+  --min-tokens-per-layer 1800 \
   --input /path/to/your/calibration.jsonl \
   --device-map auto --offload-folder offload/qwen38 \
   --output-dir results/multilayer
@@ -137,6 +138,21 @@ arguments are ignored. The one-command resumable wrapper is:
 
 ```bash
 python scripts/run_multilayer_experiment.py --max-tokens-per-layer 2000 \
+  --min-tokens-per-layer 1800 \
   --input /path/to/your/calibration.jsonl \
   --offload-folder offload/qwen38 --output-dir results/multilayer
 ```
+
+Reanalyse existing raw multi-layer CSVs without loading Qwen or recapturing data:
+
+```bash
+python scripts/analyse_multilayer_results.py \
+  --results-dir results/multilayer \
+  --min-report-samples 1000 --bootstrap-resamples 500 --seed 42
+```
+
+Add `--output-suffix _corrected` to preserve an older report and write corrected
+analysis artifacts and plots under suffixed names. Retentions are canonicalised
+to six decimal places before every group, pivot, threshold, bootstrap, and report
+lookup. Analysis accepts only raw `oracle/layer_NNN.csv` files; diagnostic
+`layer_NNN.stability.csv` files are deliberately excluded.

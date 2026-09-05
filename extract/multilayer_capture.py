@@ -69,6 +69,18 @@ def mixer_type(layer: torch.nn.Module, config=None, layer_index: int | None=None
     return "unknown"
 
 
+def estimate_corpus_tokens(tokenizer, corpus:list[dict], exclude_special:bool=True) -> dict:
+    """Cheap preflight token count performed before loading model weights."""
+    raw=usable=excluded=0
+    special_ids=set(tokenizer.all_special_ids)
+    for item in corpus:
+        ids=tokenizer(item["text"],add_special_tokens=True)["input_ids"]
+        raw+=len(ids); special=sum(int(token in special_ids) for token in ids); excluded+=special if exclude_special else 0
+        usable+=len(ids)-special if exclude_special else len(ids)
+    return {"prompts":len(corpus),"raw_tokens":raw,"usable_content_tokens":usable,
+            "special_tokens_excluded":excluded,"samples_expected_per_layer":usable}
+
+
 def _atomic_json(path: Path, value: dict) -> None:
     temporary=path.with_suffix(path.suffix+".tmp"); temporary.write_text(json.dumps(value,indent=2)+"\n"); os.replace(temporary,path)
 
@@ -87,7 +99,8 @@ def validate_layer_sample_alignment(activation_root:Path,layers:list[int])->int:
 
 def capture_multilayer(model,tokenizer,layers:list[int],corpus:list[dict],output_dir:Path,
                        max_tokens_per_layer:int=2000,activation_dtype=torch.float16,
-                       exclude_special:bool=True,seed:int=42,revision:str|None=None) -> dict:
+                       exclude_special:bool=True,seed:int=42,revision:str|None=None,
+                       corpus_diagnostics:dict|None=None) -> dict:
     """Run complete sequences normally and capture identical content-token IDs at every MLP."""
     started=time.perf_counter(); output_dir.mkdir(parents=True,exist_ok=True); activation_root=output_dir/"activations"; activation_root.mkdir(exist_ok=True)
     state_path=output_dir/"capture_state.json"; state=json.loads(state_path.read_text()) if state_path.exists() else {"completed_prompts":[],"samples":0,"shards":0}
@@ -145,5 +158,7 @@ def capture_multilayer(model,tokenizer,layers:list[int],corpus:list[dict],output
       "capture_wall_seconds":elapsed,"samples_per_second":sample_count/max(elapsed,1e-9),"peak_gpu_vram_bytes":peak_gpu,
       "peak_system_rss_kib":resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,"disk_bytes":sum(p.stat().st_size for p in output_dir.rglob("*") if p.is_file()),
       "hardware":{"cuda":torch.cuda.get_device_name() if torch.cuda.is_available() else None,"device_map":getattr(model,"hf_device_map",None)},
+      "requested_max_tokens_per_layer":max_tokens_per_layer,"actual_samples_per_layer":sample_count,
+      "corpus_token_diagnostics":corpus_diagnostics,
       "timestamp":datetime.now(timezone.utc).isoformat(),"completed_prompts":len(completed)}
     _atomic_json(output_dir/"metadata.json",metadata); return metadata
