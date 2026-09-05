@@ -41,7 +41,12 @@ def select_blocks(scores: torch.Tensor, oracle_indices: torch.Tensor, block_size
         blocks=block_order[row,:take]; mask=torch.zeros(n,dtype=torch.bool,device=scores.device)
         for block in blocks:
             first=int(block)*block_size; mask[first:min(first+block_size,n)]=True
-        indices=torch.flatnonzero(mask); selected_rows.append(indices); loaded=len(indices)
+        # PyTorch does not expose NumPy's ``flatnonzero`` helper.  ``mask`` is
+        # one-dimensional, so the first tuple element is the equivalent index
+        # vector on every supported PyTorch release.
+        indices = torch.nonzero(mask, as_tuple=True)[0]
+        selected_rows.append(indices)
+        loaded = len(indices)
         hits=(mask&oracle_mask[row]).sum().float(); recall=hits/oracle_indices.shape[1]
         counts.append(take); loaded_counts.append(loaded); recalls.append(recall)
         precisions.append(hits/max(loaded,1)); expansions.append(loaded/oracle_indices.shape[1])

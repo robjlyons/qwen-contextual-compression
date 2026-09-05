@@ -20,6 +20,23 @@ def _near(frame: pd.DataFrame, retention=.4, block=32, mode="equal_budget") -> p
 
 
 def analyse_permutation(directory: Path, bootstrap_repeats: int=2000, seed: int=42) -> str:
+    required = [
+        directory / "block_sweep.csv",
+        directory / "validation_summary.csv",
+        directory / "locality_metrics.csv",
+        directory / "neuron_clusters.csv",
+        directory / "coactivation_graph.npz",
+        directory / "orderings.npz",
+        directory / "dense_permutation_validation.json",
+    ]
+    missing = [str(path) for path in required if not path.exists()]
+    if missing:
+        raise FileNotFoundError(
+            "Cannot analyse an incomplete permutation experiment. Run "
+            "build_coactivation.py, cluster_neurons.py, and "
+            "run_permuted_block_sweep.py successfully first. Missing: "
+            + ", ".join(missing)
+        )
     raw=pd.read_csv(directory/"block_sweep.csv"); summary=pd.read_csv(directory/"validation_summary.csv")
     locality=pd.read_csv(directory/"locality_metrics.csv"); neurons=pd.read_csv(directory/"neuron_clusters.csv")
     graph=SparseGraph.load(directory/"coactivation_graph.npz"); orderings=np.load(directory/"orderings.npz")
