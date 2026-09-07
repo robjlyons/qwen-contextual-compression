@@ -1,7 +1,7 @@
 import torch
 from end_to_end.hidden_state_metrics import tensor_metrics
 from end_to_end.streaming_metrics import logit_metrics,token_nll
-from end_to_end.evaluation_runner import identity_metrics,identity_validation_checks,should_run_schedule
+from end_to_end.evaluation_runner import _append_rows,bounded_prompt_inputs,identity_metrics,identity_validation_checks,should_run_schedule
 from evaluation.metrics import output_metrics,stable_cosine
 
 def test_top_token_metrics_and_stable_kl():
@@ -46,3 +46,19 @@ def test_identity_validator_ignores_cosine_but_rejects_real_difference():
  assert all(check["passed"] for check in checks.values())
  changed=identity_metrics(torch.ones(2,4),torch.zeros(2,4));checks=identity_validation_checks(changed,1.,0.,1.,1.,0)
  assert not all(check["passed"] for check in checks.values())
+
+def test_token_budget_is_enforced_before_instrumented_forwards():
+ class Tokenizer:
+  def __call__(self,_text,**kwargs):
+   length=min(101,kwargs["max_length"]);return {"input_ids":torch.arange(length).unsqueeze(0),"attention_mask":torch.ones(1,length,dtype=torch.long)}
+ class Counter:
+  def __init__(self):self.forwarded=[]
+  def __call__(self,encoded):self.forwarded.append(encoded["input_ids"].shape[1]);return encoded
+ corpus=[{"text":str(index)} for index in range(100)];counter=Counter();evaluated=0
+ for _prompt_id,_item,encoded,take in bounded_prompt_inputs(Tokenizer(),corpus,250,128):counter(encoded);evaluated+=take
+ assert evaluated==250 and counter.forwarded==[101,101,51] and sum(length-1 for length in counter.forwarded)==250
+
+def test_persisted_rows_reject_retained_tensor_references(tmp_path):
+ import pytest
+ with pytest.raises(TypeError):_append_rows(tmp_path/"bad.csv",[{"metric":torch.ones(100)}])
+ _append_rows(tmp_path/"good.csv",[{"metric":1.0,"prompt_id":1}]);assert (tmp_path/"good.csv").is_file()

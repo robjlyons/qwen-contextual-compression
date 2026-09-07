@@ -32,16 +32,29 @@ def load_model(name: str, dtype: str = "bfloat16", device_map: str | None = "aut
     return AutoModelForCausalLM.from_pretrained(name, **kwargs)
 
 
-def cuda_max_memory_with_headroom(headroom_mib: int) -> dict[int, int]:
-    """Accelerate max-memory map leaving requested space on every CUDA device."""
+def dispatch_max_memory(gpu_headroom_mib: int | None = None,
+                        cpu_max_memory_gib: float | None = None) -> dict:
+    """Build an Accelerate constraint map for GPU headroom and CPU offload."""
+    if gpu_headroom_mib is None and cpu_max_memory_gib is None:return {}
+    result={}
+    if cpu_max_memory_gib is not None:
+        if cpu_max_memory_gib<=0:raise ValueError("CPU max memory must be positive")
+        result["cpu"]=int(cpu_max_memory_gib*2**30)
+    if gpu_headroom_mib is None:return result
+    headroom_mib=gpu_headroom_mib
     if headroom_mib < 0: raise ValueError("GPU headroom must be non-negative")
     if not torch.cuda.is_available(): raise RuntimeError("--gpu-headroom-mib requires CUDA")
-    reserve=headroom_mib*2**20;result={}
+    reserve=headroom_mib*2**20
     for index in range(torch.cuda.device_count()):
         total=torch.cuda.get_device_properties(index).total_memory
         if reserve>=total:raise ValueError(f"GPU headroom exceeds cuda:{index} capacity")
         result[index]=total-reserve
     return result
+
+
+def cuda_max_memory_with_headroom(headroom_mib: int) -> dict[int, int]:
+    """Backward-compatible GPU-only constraint helper."""
+    return dispatch_max_memory(headroom_mib)
 
 
 def inspect(model, layer_index: int) -> dict:

@@ -195,6 +195,14 @@ python scripts/run_end_to_end_oracle.py --model Qwen/Qwen3.8-27B \
 python scripts/analyse_end_to_end.py --results-dir results/end_to_end
 ```
 
+The evaluator enforces both limits before each model forward, processes one
+prompt at a time, writes compact scalar rows after every completed prompt, and
+records per-prompt RSS in `memory_telemetry.csv`. For a Kaggle memory diagnostic,
+run the measured-conservative schedule first with `--max-eval-tokens 32
+--max-prompt-tokens 128 --gpu-headroom-mib 512 --cpu-max-memory-gib 18`.
+The CPU cap requires an `--offload-folder`; overflow weights are left for
+Accelerate's disk-offload dispatch rather than consuming unbounded host RAM.
+
 If wrapper validation and smoke metrics are sound, increase only the token limit:
 
 ```bash

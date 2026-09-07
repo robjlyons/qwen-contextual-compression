@@ -1,9 +1,10 @@
 """Streaming dense-vs-sparse teacher-forced and deterministic generation runner."""
 from __future__ import annotations
-import json,time
+import gc,json,os,time
 from pathlib import Path
 import pandas as pd
 import torch
+import psutil
 from end_to_end.hidden_state_metrics import LayerStateMonitor
 from end_to_end.model_patcher import OracleMLPPatcher
 from end_to_end.schedules import active_parameter_accounting
@@ -72,8 +73,51 @@ def _position_bucket(position:int)->str:
     return "0-31" if position<32 else "32-127" if position<128 else "128-511" if position<512 else "512+"
 
 
+def _rss_mib()->float:return psutil.Process(os.getpid()).memory_info().rss/2**20
+
+
+def _append_rows(path:Path,rows:list[dict])->None:
+    if not rows:return
+    if any(isinstance(value,torch.Tensor) for row in rows for value in row.values()):
+        raise TypeError("compact result rows must not retain tensors")
+    pd.DataFrame(rows).to_csv(path,mode="a",header=not path.exists(),index=False)
+
+
+def _atomic_json(path:Path,value:dict)->None:
+    temporary=path.with_suffix(path.suffix+".tmp");temporary.write_text(json.dumps(value,indent=2)+"\n");temporary.replace(path)
+
+
+def _discard_incomplete_prompt_rows(paths:list[Path],completed_prompts:int)->None:
+    """Remove any rows flushed for a prompt whose checkpoint was not committed."""
+    for path in paths:
+        if not path.exists() or path.suffix!=".csv":continue
+        frame=pd.read_csv(path)
+        if "prompt_id" in frame:frame=frame[frame.prompt_id<completed_prompts]
+        frame.to_csv(path,index=False)
+
+
+def bounded_prompt_inputs(tokenizer,corpus:list[dict],max_eval_tokens:int,
+                          max_prompt_tokens:int,start_prompt:int=0,
+                          already_evaluated:int=0):
+    """Yield only sequences that fit the remaining target-token budget."""
+    remaining=max_eval_tokens-already_evaluated
+    for prompt_id,item in enumerate(corpus):
+        if prompt_id<start_prompt:continue
+        if remaining<=0:break
+        encoded=tokenizer(item["text"],return_tensors="pt",truncation=True,
+                          max_length=min(max_prompt_tokens,remaining+1))
+        take=min(max(0,encoded["input_ids"].shape[1]-1),remaining)
+        if take<=0:continue
+        yield prompt_id,item,{key:value[:,:take+1] for key,value in encoded.items()},take
+        remaining-=take
+
+
 def evaluate_schedules(model,tokenizer,corpus:list[dict],schedules:dict[str,list[float]],output_dir:Path,
-                       max_eval_tokens:int=250,force:bool=False,norm_chunk_columns:int=256)->dict:
+                       max_eval_tokens:int=250,force:bool=False,norm_chunk_columns:int=256,
+                       max_prompt_tokens:int=128)->dict:
+    """Evaluate one bounded prompt at a time and persist compact rows immediately."""
+    if max_eval_tokens<=0:raise ValueError("max_eval_tokens must be positive")
+    if max_prompt_tokens<2:raise ValueError("max_prompt_tokens must be at least 2")
     output_dir.mkdir(parents=True,exist_ok=True);teacher=output_dir/"teacher_forced";teacher.mkdir(exist_ok=True)
     local_rows=[]
     def telemetry(layer,metrics):
@@ -85,37 +129,47 @@ def evaluate_schedules(model,tokenizer,corpus:list[dict],schedules:dict[str,list
     (output_dir/"schedule_expansions.json").write_text(json.dumps(expansions,indent=2)+"\n")
     validation_path=output_dir/"wrapper_validation.json"
     if validation_path.exists() and not force:validation=json.loads(validation_path.read_text())
-    else:validation=validate_wrapper(model,tokenizer,patcher,corpus[0]["text"]);validation_path.write_text(json.dumps(validation,indent=2)+"\n")
+    else:
+        validation_text=tokenizer.decode(tokenizer(corpus[0]["text"],truncation=True,max_length=max_prompt_tokens)["input_ids"])
+        validation=validate_wrapper(model,tokenizer,patcher,validation_text);validation_path.write_text(json.dumps(validation,indent=2)+"\n")
     if not validation.get("passed"):raise RuntimeError("Saved wrapper validation did not pass")
-    dense_baseline=teacher/"dense_baseline.csv";run_metadata={}
+    names=[name for name in schedules if name!="dense"];dense_baseline=teacher/"dense_baseline.csv";progress_path=output_dir/"progress.json";memory_path=output_dir/"memory_telemetry.csv"
+    artifacts=[dense_baseline,memory_path,*[teacher/f"{name}.csv" for name in names],*[output_dir/f"hidden_state_drift_{name}.csv" for name in names],*[output_dir/f"ffn_local_error_{name}.csv" for name in names]]
+    if force:
+        for path in artifacts:
+            if path.exists():path.unlink()
+        if progress_path.exists():progress_path.unlink()
+    progress=json.loads(progress_path.read_text()) if progress_path.exists() else {"completed_prompts":0,"evaluated_tokens":0,"schedules":names,"max_eval_tokens":max_eval_tokens,"max_prompt_tokens":max_prompt_tokens}
+    if progress["schedules"]!=names or progress["max_eval_tokens"]!=max_eval_tokens or progress["max_prompt_tokens"]!=max_prompt_tokens:raise ValueError("Resume configuration differs; use --force or a new output directory")
+    if progress_path.exists():_discard_incomplete_prompt_rows(artifacts,int(progress["completed_prompts"]))
+    evaluated=int(progress["evaluated_tokens"]);started=time.perf_counter();peak_rss=_rss_mib();baseline_rss=peak_rss
     try:
-      for schedule_name,schedule in schedules.items():
-        target=dense_baseline if schedule_name=="dense" else teacher/f"{schedule_name}.csv"
-        if not should_run_schedule(target,force):run_metadata[schedule_name]={"status":"skipped_complete"};continue
-        started=time.perf_counter();rows=[];hidden_rows=[];ffn_rows=[];evaluated=0;dense_rows=[]
-        for prompt_id,item in enumerate(corpus):
-          if evaluated>=max_eval_tokens:break
-          encoded=tokenizer(item["text"],return_tensors="pt",truncation=True);usable=max(0,encoded["input_ids"].shape[1]-1);take=min(usable,max_eval_tokens-evaluated)
-          if take<=0:continue
-          # Include one following label and evaluate identical positions in both modes.
-          encoded={key:value[:,:take+1].to(model.get_input_embeddings().weight.device) for key,value in encoded.items()}
+        batches=bounded_prompt_inputs(tokenizer,corpus,max_eval_tokens,max_prompt_tokens,int(progress["completed_prompts"]),evaluated)
+        for prompt_id,item,encoded,take in batches:
+          rss_before=_rss_mib();encoded={key:value.to(model.get_input_embeddings().weight.device) for key,value in encoded.items()}
           monitor.start_dense();patcher.dense()
           with torch.inference_mode():dense=model(**encoded,use_cache=False).logits[:,:-1]
-          dense_cpu=dense.detach().cpu();labels=encoded["input_ids"][:,1:].detach().cpu();local_rows.clear();monitor.start_sparse();patcher.apply_schedule(schedule)
-          with torch.inference_mode():sparse=model(**encoded,use_cache=False).logits[:,:-1]
-          sparse_cpu=sparse.detach().cpu();metrics=logit_metrics(dense_cpu.flatten(0,-2),sparse_cpu.flatten(0,-2));dense_nll=token_nll(dense_cpu.flatten(0,-2),labels.flatten());sparse_nll=token_nll(sparse_cpu.flatten(0,-2),labels.flatten())
-          for position in range(take):
-            record={"schedule":schedule_name,"prompt_id":prompt_id,"token_position":position,"position_bucket":_position_bucket(position),"category":item.get("category","unknown"),"source":item.get("source","unknown"),"label_token_id":int(labels[0,position]),"dense_nll":float(dense_nll[position]),"sparse_nll":float(sparse_nll[position])}
-            record.update({key:float(value[position]) for key,value in metrics.items()});rows.append(record)
-            dense_rows.append({**record,"schedule":"dense","sparse_nll":record["dense_nll"],"logit_cosine":1.,"logit_relative_l2":0.,"logit_mse":0.,"max_absolute_logit_difference":0.,"kl_dense_sparse":0.,"kl_sparse_dense":0.,"js_divergence":0.,"top1_agreement":1.,"dense_top1_in_sparse_top5":1.,"sparse_top1_in_dense_top5":1.,"top5_set_overlap":1.,"top10_set_overlap":1.})
-          for row in monitor.rows:row.update({"schedule":schedule_name,"prompt_id":prompt_id});hidden_rows.extend(monitor.rows)
-          for row in local_rows:row.update({"schedule":schedule_name,"prompt_id":prompt_id});ffn_rows.extend(local_rows)
-          evaluated+=take;del dense,sparse,dense_cpu,sparse_cpu
-        pd.DataFrame(rows).to_csv(target,index=False);pd.DataFrame(hidden_rows).to_csv(output_dir/f"hidden_state_drift_{schedule_name}.csv",index=False);pd.DataFrame(ffn_rows).to_csv(output_dir/f"ffn_local_error_{schedule_name}.csv",index=False)
-        if schedule_name!="dense" and (not dense_baseline.exists() or force):pd.DataFrame(dense_rows).to_csv(dense_baseline,index=False)
-        run_metadata[schedule_name]={"status":"complete","tokens":evaluated,"wall_seconds":time.perf_counter()-started}
+          dense_cpu=dense.detach().cpu();del dense;labels=encoded["input_ids"][:,1:].detach().cpu();dense_nll=token_nll(dense_cpu.flatten(0,-2),labels.flatten());rss_dense=_rss_mib();dense_rows=[];truncated=encoded["input_ids"].shape[1]>=max_prompt_tokens
+          for position in range(take):dense_rows.append({"schedule":"dense","prompt_id":prompt_id,"token_position":position,"position_bucket":_position_bucket(position),"category":item.get("category","unknown"),"source":item.get("source","unknown"),"label_token_id":int(labels[0,position]),"prompt_truncated":truncated,"forward_sequence_tokens":take+1,"dense_nll":float(dense_nll[position]),"sparse_nll":float(dense_nll[position]),"logit_cosine":1.,"logit_relative_l2":0.,"logit_mse":0.,"max_absolute_logit_difference":0.,"kl_dense_sparse":0.,"kl_sparse_dense":0.,"js_divergence":0.,"top1_agreement":1.,"dense_top1_in_sparse_top5":1.,"sparse_top1_in_dense_top5":1.,"top5_set_overlap":1.,"top10_set_overlap":1.,"dense_margin":float(torch.topk(dense_cpu[0,position].float(),2).values.diff().neg())})
+          _append_rows(dense_baseline,dense_rows)
+          sparse_peaks={}
+          for schedule_name in names:
+            local_rows.clear();monitor.start_sparse();patcher.apply_schedule(schedules[schedule_name])
+            with torch.inference_mode():sparse=model(**encoded,use_cache=False).logits[:,:-1]
+            sparse_cpu=sparse.detach().cpu();metrics=logit_metrics(dense_cpu.flatten(0,-2),sparse_cpu.flatten(0,-2));sparse_nll=token_nll(sparse_cpu.flatten(0,-2),labels.flatten());rows=[]
+            for position in range(take):
+              record={"schedule":schedule_name,"prompt_id":prompt_id,"token_position":position,"position_bucket":_position_bucket(position),"category":item.get("category","unknown"),"source":item.get("source","unknown"),"label_token_id":int(labels[0,position]),"prompt_truncated":truncated,"forward_sequence_tokens":take+1,"dense_nll":float(dense_nll[position]),"sparse_nll":float(sparse_nll[position])};record.update({key:float(value[position]) for key,value in metrics.items()});rows.append(record)
+            _append_rows(teacher/f"{schedule_name}.csv",rows)
+            for row in monitor.rows:row.update({"schedule":schedule_name,"prompt_id":prompt_id})
+            _append_rows(output_dir/f"hidden_state_drift_{schedule_name}.csv",monitor.rows)
+            for row in local_rows:row.update({"schedule":schedule_name,"prompt_id":prompt_id})
+            _append_rows(output_dir/f"ffn_local_error_{schedule_name}.csv",local_rows);sparse_peaks[schedule_name]=_rss_mib();monitor.rows.clear();del sparse,sparse_cpu,metrics,sparse_nll,rows
+          evaluated+=take;monitor.release_prompt();del dense_cpu,dense_nll,dense_rows,labels,encoded;gc.collect()
+          if torch.cuda.is_available():torch.cuda.empty_cache()
+          rss_cleanup=_rss_mib();peak_rss=max(peak_rss,rss_before,rss_dense,rss_cleanup,*sparse_peaks.values());memory_record={"prompt_id":prompt_id,"evaluated_tokens":take,"total_evaluated_tokens":evaluated,"rss_before_prompt_mib":rss_before,"rss_after_dense_mib":rss_dense,"rss_after_sparse_mib":sparse_peaks,"rss_after_cleanup_mib":rss_cleanup,"post_model_baseline_rss_mib":baseline_rss,"peak_rss_mib":peak_rss};_append_rows(memory_path,[memory_record])
+          print(json.dumps(memory_record));progress.update({"completed_prompts":prompt_id+1,"evaluated_tokens":evaluated,"peak_rss_mib":peak_rss});_atomic_json(progress_path,progress)
     finally:monitor.close();patcher.restore()
-    (output_dir/"run_metadata.json").write_text(json.dumps(run_metadata,indent=2)+"\n");return run_metadata
+    run_metadata={name:{"status":"complete" if evaluated>=max_eval_tokens else "corpus_exhausted","tokens":evaluated,"wall_seconds":time.perf_counter()-started} for name in ["dense",*names]};run_metadata["memory"]={"post_model_baseline_rss_mib":baseline_rss,"peak_rss_mib":peak_rss};_atomic_json(output_dir/"run_metadata.json",run_metadata);return run_metadata
 
 
 def generation_pairs(model,tokenizer,corpus,schedules,output_dir,max_prompts=20,max_new_tokens=64):

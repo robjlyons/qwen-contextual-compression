@@ -33,5 +33,8 @@ class LayerStateMonitor:
         for token in range(len(metrics["cosine_similarity"])):self.rows.append({"layer":index,"stage":stage,"token_position":token%sequence_length,**{key:float(value[token].cpu()) for key,value in metrics.items()}})
     def start_dense(self):self.mode="dense";self.dense_inputs.clear();self.dense_outputs.clear();self.rows.clear()
     def start_sparse(self):self.mode="sparse"
+    def release_prompt(self):
+        """Release the only raw dense references retained by the monitor."""
+        self.dense_inputs.clear();self.dense_outputs.clear();self.rows.clear()
     def close(self):
         for handle in self.handles:handle.remove()

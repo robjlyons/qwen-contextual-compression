@@ -73,10 +73,14 @@ def analyse_end_to_end(results_dir:Path,resamples:int=500,seed:int=42,top1_thres
     elif measured_ok("all_conservative"):outcome="OUTCOME B — CONSERVATIVE SPARSITY SURVIVES, MODERATE DOES NOT";recommendation="Optimise per-layer retention under an end-to-end constraint."
     elif measured_ok("measured_conservative") or measured_ok("measured_moderate"):outcome="OUTCOME C — MEASURED-LAYER SPARSITY WORKS, ALL-LAYER SCHEDULE DOES NOT";recommendation="Measure all 64 isolated FFN curves before extrapolating."
     else:outcome="OUTCOME D — ERRORS ACCUMULATE STRONGLY";recommendation="Derive stricter layer-specific error budgets and identify sensitive layers."
+    run_metadata=json.loads((results_dir/"run_metadata.json").read_text()) if (results_dir/"run_metadata.json").exists() else {};memory=run_metadata.get("memory",{});memory_text=(f"Post-model baseline RSS: {memory.get('post_model_baseline_rss_mib','N/A')} MiB; peak RSS: {memory.get('peak_rss_mib','N/A')} MiB. Per-prompt checkpoints are in `memory_telemetry.csv`.")
     report=f"""# End-to-End Oracle Sparse FFN Propagation
 
 ## Main results
 {_markdown(summary)}
+
+## Memory safety
+{memory_text}
 
 ## Interpretation
 Final logits, KL, token agreement, perplexity, and propagated hidden-state drift—not isolated FFN cosine—are the source of truth. Engineering thresholds are configurable (`top1 >= {top1_threshold}`, relative PPL increase `<= {ppl_threshold}`) and are not universal quality laws.
