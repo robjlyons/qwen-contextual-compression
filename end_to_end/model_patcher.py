@@ -10,12 +10,16 @@ def _parent_and_name(model:nn.Module,path:str):
 
 
 class OracleMLPPatcher:
-    def __init__(self,model:nn.Module,telemetry=None):
+    def __init__(self,model:nn.Module,telemetry=None,norm_chunk_columns:int=256):
         self.model=model; self.wrappers={}; self.originals={}
         first=locate_ffn(model,0); layers=model.get_submodule(first.layers_path)
         for index in range(len(layers)):
             found=locate_ffn(model,index); parent,name=_parent_and_name(model,found.path); original=getattr(parent,name)
-            wrapper=OracleSparseMLP(original,index,1.,telemetry); setattr(parent,name,wrapper); self.wrappers[index]=wrapper; self.originals[index]=(parent,name,original)
+            wrapper=OracleSparseMLP(original,index,1.,telemetry,norm_chunk_columns); setattr(parent,name,wrapper); self.wrappers[index]=wrapper; self.originals[index]=(parent,name,original)
+
+    @property
+    def norm_computation_count(self)->int:
+        return sum(wrapper.norm_computation_count for wrapper in self.wrappers.values())
 
     def dense(self)->None:
         for wrapper in self.wrappers.values(): wrapper.set_mode(False)

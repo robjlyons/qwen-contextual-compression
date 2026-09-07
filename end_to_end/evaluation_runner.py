@@ -16,6 +16,15 @@ def should_run_schedule(path:Path,force:bool=False)->bool:
     return force or not path.is_file()
 
 
+def _cuda_memory(reset_peak:bool=False)->dict:
+    result={}
+    if not torch.cuda.is_available():return result
+    for index in range(torch.cuda.device_count()):
+        if reset_peak:torch.cuda.reset_peak_memory_stats(index)
+        result[f"cuda:{index}"]={"allocated_mib":torch.cuda.memory_allocated(index)/2**20,"reserved_mib":torch.cuda.memory_reserved(index)/2**20,"peak_allocated_mib":torch.cuda.max_memory_allocated(index)/2**20}
+    return result
+
+
 def validate_wrapper(model,tokenizer,patcher:OracleMLPPatcher,text:str)->dict:
     encoded=tokenizer(text,return_tensors="pt");device=model.get_input_embeddings().weight.device;encoded={k:v.to(device) for k,v in encoded.items()}
     mode={"value":"dense"};ffn_dense={};ffn_sparse={};handles=[]
@@ -23,18 +32,20 @@ def validate_wrapper(model,tokenizer,patcher:OracleMLPPatcher,text:str)->dict:
         def capture(_module,_args,output,layer=index):
             target=ffn_dense if mode["value"]=="dense" else ffn_sparse;target[layer]=output.detach().cpu()
         handles.append(wrapper.register_forward_hook(capture))
-    patcher.dense()
+    patcher.dense();memory={"before_model_forward":_cuda_memory(reset_peak=True)}
     with torch.inference_mode():dense=model(**encoded,output_hidden_states=True,use_cache=False)
-    mode["value"]="sparse";patcher.apply_schedule([1.]*len(patcher.wrappers))
+    memory["dense_forward"]=_cuda_memory();dense_logits=dense.logits.detach().cpu();dense_hidden=[state.detach().cpu() for state in dense.hidden_states];del dense;_cuda_memory(reset_peak=True)
+    mode["value"]="sparse";patcher.apply_schedule([1.]*len(patcher.wrappers));norms_before=patcher.norm_computation_count
     with torch.inference_mode():sparse=model(**encoded,output_hidden_states=True,use_cache=False)
+    memory["sparse_100_percent_forward"]=_cuda_memory();memory["norm_preparation"]={"computed_layers":patcher.norm_computation_count-norms_before,"peak_memory":{}}
     for handle in handles:handle.remove()
-    metrics=logit_metrics(dense.logits.flatten(0,-2),sparse.logits.flatten(0,-2)); hidden=[]
-    for layer,(left,right) in enumerate(zip(dense.hidden_states,sparse.hidden_states)):
-        cosine=torch.nn.functional.cosine_similarity(left.float(),right.float(),dim=-1);relative=torch.linalg.vector_norm((left-right).float(),dim=-1)/torch.linalg.vector_norm(left.float(),dim=-1).clamp_min(1e-12);hidden.append({"layer":layer,"mean_cosine":float(cosine.mean()),"max_relative_l2":float(relative.max())})
+    sparse_logits=sparse.logits.detach().cpu();metrics=logit_metrics(dense_logits.flatten(0,-2),sparse_logits.flatten(0,-2)); hidden=[]
+    for layer,(left,right) in enumerate(zip(dense_hidden,sparse.hidden_states)):
+        right=right.detach().cpu();cosine=torch.nn.functional.cosine_similarity(left.float(),right.float(),dim=-1);relative=torch.linalg.vector_norm((left-right).float(),dim=-1)/torch.linalg.vector_norm(left.float(),dim=-1).clamp_min(1e-12);hidden.append({"layer":layer,"mean_cosine":float(cosine.mean()),"max_relative_l2":float(relative.max())})
     ffn=[]
     for layer in sorted(ffn_dense):
         left,right=ffn_dense[layer].float(),ffn_sparse[layer].float();ffn.append({"layer":layer,"mean_cosine":float(torch.nn.functional.cosine_similarity(left,right,dim=-1).mean()),"max_absolute_error":float((left-right).abs().max())})
-    result={"tokens":int(dense.logits.shape[-2]),"logit_cosine_mean":float(metrics["logit_cosine"].mean()),"logit_relative_l2_max":float(metrics["logit_relative_l2"].max()),"kl_dense_sparse_mean":float(metrics["kl_dense_sparse"].mean()),"top1_agreement":float(metrics["top1_agreement"].mean()),"ffn_outputs":ffn,"hidden_states":hidden,
+    result={"tokens":int(dense_logits.shape[-2]),"logit_cosine_mean":float(metrics["logit_cosine"].mean()),"logit_relative_l2_max":float(metrics["logit_relative_l2"].max()),"max_absolute_logit_difference":float(metrics["max_absolute_logit_difference"].max()),"kl_dense_sparse_mean":float(metrics["kl_dense_sparse"].mean()),"top1_agreement":float(metrics["top1_agreement"].mean()),"down_column_norm_computations":patcher.norm_computation_count-norms_before,"gpu_memory":memory,"ffn_outputs":ffn,"hidden_states":hidden,
       "passed":bool(metrics["logit_cosine"].mean()>=.99999 and metrics["logit_relative_l2"].max()<=1e-3 and metrics["top1_agreement"].mean()==1)}
     if not result["passed"]:raise RuntimeError(f"100% sparse wrapper validation failed; sparse schedules are blocked: {result}")
     return result
@@ -45,13 +56,13 @@ def _position_bucket(position:int)->str:
 
 
 def evaluate_schedules(model,tokenizer,corpus:list[dict],schedules:dict[str,list[float]],output_dir:Path,
-                       max_eval_tokens:int=250,force:bool=False)->dict:
+                       max_eval_tokens:int=250,force:bool=False,norm_chunk_columns:int=256)->dict:
     output_dir.mkdir(parents=True,exist_ok=True);teacher=output_dir/"teacher_forced";teacher.mkdir(exist_ok=True)
     local_rows=[]
     def telemetry(layer,metrics):
         length=len(next(iter(metrics.values())))
         for token in range(length):local_rows.append({"layer":layer,"token_offset":token,**{key:float(value[token].cpu()) for key,value in metrics.items()}})
-    patcher=OracleMLPPatcher(model,telemetry);first=locate_ffn(model,0);layers=model.get_submodule(first.layers_path);monitor=LayerStateMonitor(layers)
+    patcher=OracleMLPPatcher(model,telemetry,norm_chunk_columns);first=locate_ffn(model,0);layers=model.get_submodule(first.layers_path);monitor=LayerStateMonitor(layers)
     ffn_parameters=[sum(parameter.numel() for parameter in wrapper.original.parameters()) for wrapper in patcher.wrappers.values()];total_parameters=sum(parameter.numel() for parameter in model.parameters())
     expansions={name:{"schedule":schedule,**active_parameter_accounting(schedule,ffn_parameters,total_parameters),"actual_oracle_executes_dense_gate_up":True,"runtime_speedup_claimed":False} for name,schedule in schedules.items()}
     (output_dir/"schedule_expansions.json").write_text(json.dumps(expansions,indent=2)+"\n")

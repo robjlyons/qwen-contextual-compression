@@ -171,8 +171,17 @@ Validate the wrapper first:
 
 ```bash
 python scripts/validate_sparse_wrapper.py --model Qwen/Qwen3.8-27B \
-  --device-map auto --offload-folder offload/qwen38
+  --device-map auto --offload-folder offload/qwen38 \
+  --norm-chunk-columns 256
 ```
+
+Down-projection norms are lazy, cached CPU FP32 vectors. They are never prepared
+for dense or 100%-retention execution; sparse execution converts only a bounded
+column chunk to FP32 (about 5 MiB for Qwen's 5,120 rows and 256 columns). An
+optional small CUDA allocation diagnostic is available as
+`python scripts/diagnose_norm_memory.py`; pass `--out-features 5120
+--intermediate-size 17408` only on a GPU with room for the approximately 170 MiB
+synthetic FP16 source weight.
 
 Run the ordered 250-token smoke controls on a genuinely held-out corpus:
 
