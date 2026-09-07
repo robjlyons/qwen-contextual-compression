@@ -9,6 +9,7 @@ from end_to_end.model_patcher import OracleMLPPatcher
 from end_to_end.schedules import active_parameter_accounting
 from end_to_end.streaming_metrics import logit_metrics,token_nll
 from extract.extract_ffn import locate_ffn
+from evaluation.metrics import output_metrics
 
 
 def should_run_schedule(path:Path,force:bool=False)->bool:
@@ -25,6 +26,20 @@ def _cuda_memory(reset_peak:bool=False)->dict:
     return result
 
 
+def identity_metrics(dense:torch.Tensor,sparse:torch.Tensor,atol:float=1e-6,rtol:float=1e-6)->dict:
+    """Strict identity diagnostics; cosine is FP64 and never decides pass/fail."""
+    flattened_dense=dense.flatten(0,-2);flattened_sparse=sparse.flatten(0,-2)
+    metrics=output_metrics(flattened_dense,flattened_sparse,cosine_dtype=torch.float64)
+    delta=(dense-sparse).float()
+    return {"cosine_mean":float(metrics["cosine_similarity"].mean()),"relative_l2_max":float(metrics["relative_l2"].max()),"mse_mean":float(metrics["mse"].mean()),"max_abs_diff":float(metrics["max_absolute_error"].max()),"mean_abs_diff":float(delta.abs().mean()),"exact_equal":bool(torch.equal(dense,sparse)),"allclose":bool(torch.allclose(dense,sparse,atol=atol,rtol=rtol))}
+
+
+def identity_validation_checks(logits:dict,kl:float,top1:float,max_hidden:float,
+                               max_ffn:float,norm_count:int)->dict:
+    """Return individually inspectable checks; cosine is intentionally absent."""
+    return {"logit_max_abs":{"value":logits["max_abs_diff"],"threshold":1e-6,"passed":logits["max_abs_diff"]<=1e-6},"logit_relative_l2":{"value":logits["relative_l2_max"],"threshold":1e-6,"passed":logits["relative_l2_max"]<=1e-6},"logit_allclose":{"value":logits["allclose"],"threshold":True,"passed":logits["allclose"]},"kl":{"value":kl,"threshold":1e-7,"passed":kl<=1e-7},"top1_agreement":{"value":top1,"threshold":1.0,"passed":top1==1.0},"hidden_max_abs":{"value":max_hidden,"threshold":1e-6,"passed":max_hidden<=1e-6},"ffn_max_abs":{"value":max_ffn,"threshold":1e-6,"passed":max_ffn<=1e-6},"norm_computations":{"value":norm_count,"threshold":0,"passed":norm_count==0}}
+
+
 def validate_wrapper(model,tokenizer,patcher:OracleMLPPatcher,text:str)->dict:
     encoded=tokenizer(text,return_tensors="pt");device=model.get_input_embeddings().weight.device;encoded={k:v.to(device) for k,v in encoded.items()}
     mode={"value":"dense"};ffn_dense={};ffn_sparse={};handles=[]
@@ -39,14 +54,16 @@ def validate_wrapper(model,tokenizer,patcher:OracleMLPPatcher,text:str)->dict:
     with torch.inference_mode():sparse=model(**encoded,output_hidden_states=True,use_cache=False)
     memory["sparse_100_percent_forward"]=_cuda_memory();memory["norm_preparation"]={"computed_layers":patcher.norm_computation_count-norms_before,"peak_memory":{}}
     for handle in handles:handle.remove()
-    sparse_logits=sparse.logits.detach().cpu();metrics=logit_metrics(dense_logits.flatten(0,-2),sparse_logits.flatten(0,-2)); hidden=[]
+    sparse_logits=sparse.logits.detach().cpu();metrics=logit_metrics(dense_logits.flatten(0,-2),sparse_logits.flatten(0,-2));logit_identity=identity_metrics(dense_logits,sparse_logits); hidden=[]
     for layer,(left,right) in enumerate(zip(dense_hidden,sparse.hidden_states)):
-        right=right.detach().cpu();cosine=torch.nn.functional.cosine_similarity(left.float(),right.float(),dim=-1);relative=torch.linalg.vector_norm((left-right).float(),dim=-1)/torch.linalg.vector_norm(left.float(),dim=-1).clamp_min(1e-12);hidden.append({"layer":layer,"mean_cosine":float(cosine.mean()),"max_relative_l2":float(relative.max())})
+        right=right.detach().cpu();hidden.append({"layer":layer,**identity_metrics(left,right)})
     ffn=[]
     for layer in sorted(ffn_dense):
-        left,right=ffn_dense[layer].float(),ffn_sparse[layer].float();ffn.append({"layer":layer,"mean_cosine":float(torch.nn.functional.cosine_similarity(left,right,dim=-1).mean()),"max_absolute_error":float((left-right).abs().max())})
-    result={"tokens":int(dense_logits.shape[-2]),"logit_cosine_mean":float(metrics["logit_cosine"].mean()),"logit_relative_l2_max":float(metrics["logit_relative_l2"].max()),"max_absolute_logit_difference":float(metrics["max_absolute_logit_difference"].max()),"kl_dense_sparse_mean":float(metrics["kl_dense_sparse"].mean()),"top1_agreement":float(metrics["top1_agreement"].mean()),"down_column_norm_computations":patcher.norm_computation_count-norms_before,"gpu_memory":memory,"ffn_outputs":ffn,"hidden_states":hidden,
-      "passed":bool(metrics["logit_cosine"].mean()>=.99999 and metrics["logit_relative_l2"].max()<=1e-3 and metrics["top1_agreement"].mean()==1)}
+        ffn.append({"layer":layer,**identity_metrics(ffn_dense[layer],ffn_sparse[layer])})
+    norm_count=patcher.norm_computation_count-norms_before;kl=abs(float(metrics["kl_dense_sparse"].mean()));top1=float(metrics["top1_agreement"].mean());max_hidden=max(item["max_abs_diff"] for item in hidden);max_ffn=max(item["max_abs_diff"] for item in ffn)
+    checks=identity_validation_checks(logit_identity,kl,top1,max_hidden,max_ffn,norm_count)
+    failed=[name for name,check in checks.items() if not check["passed"]]
+    result={"tokens":int(dense_logits.shape[-2]),"logit_cosine_mean":logit_identity["cosine_mean"],"logit_relative_l2_max":logit_identity["relative_l2_max"],"max_absolute_logit_difference":logit_identity["max_abs_diff"],"mean_absolute_logit_difference":logit_identity["mean_abs_diff"],"logits_exact_equal":logit_identity["exact_equal"],"logits_allclose":logit_identity["allclose"],"kl_dense_sparse_mean":float(metrics["kl_dense_sparse"].mean()),"top1_agreement":top1,"down_column_norm_computations":norm_count,"gpu_memory":memory,"checks":checks,"failed_checks":failed,"ffn_outputs":ffn,"hidden_states":hidden,"passed":not failed}
     if not result["passed"]:raise RuntimeError(f"100% sparse wrapper validation failed; sparse schedules are blocked: {result}")
     return result
 

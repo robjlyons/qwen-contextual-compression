@@ -188,8 +188,9 @@ Run the ordered 250-token smoke controls on a genuinely held-out corpus:
 ```bash
 python scripts/run_end_to_end_oracle.py --model Qwen/Qwen3.8-27B \
   --input /path/to/heldout.jsonl --max-eval-tokens 250 \
-  --schedules dense,measured_conservative,measured_moderate,all_conservative,all_moderate \
+  --schedules measured_conservative,measured_moderate \
   --device-map auto --offload-folder offload/qwen38 \
+  --gpu-headroom-mib 512 --norm-chunk-columns 256 \
   --output-dir results/end_to_end
 python scripts/analyse_end_to_end.py --results-dir results/end_to_end
 ```

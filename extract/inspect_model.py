@@ -14,7 +14,7 @@ def load_model(name: str, dtype: str = "bfloat16", device_map: str | None = "aut
                offload_folder: str | None = None, revision: str | None = None,
                *, layer: int = 0, device: str | None = None, full_model: bool = False,
                cache_dir: str | None = None, token: str | None = None,
-               trust_remote_code: bool = False):
+               trust_remote_code: bool = False, max_memory: dict | None = None):
     if not full_model:
         selected_dtype = DTYPES[dtype]
         if selected_dtype == "auto":
@@ -25,10 +25,23 @@ def load_model(name: str, dtype: str = "bfloat16", device_map: str | None = "aut
     kwargs = {"dtype": DTYPES[dtype], "revision": revision, "low_cpu_mem_usage": True,
               "cache_dir": cache_dir, "token": token, "trust_remote_code": trust_remote_code}
     if device_map and device_map != "none": kwargs["device_map"] = device_map
+    if max_memory: kwargs["max_memory"] = max_memory
     if offload_folder:
         Path(offload_folder).mkdir(parents=True, exist_ok=True)
         kwargs["offload_folder"] = offload_folder
     return AutoModelForCausalLM.from_pretrained(name, **kwargs)
+
+
+def cuda_max_memory_with_headroom(headroom_mib: int) -> dict[int, int]:
+    """Accelerate max-memory map leaving requested space on every CUDA device."""
+    if headroom_mib < 0: raise ValueError("GPU headroom must be non-negative")
+    if not torch.cuda.is_available(): raise RuntimeError("--gpu-headroom-mib requires CUDA")
+    reserve=headroom_mib*2**20;result={}
+    for index in range(torch.cuda.device_count()):
+        total=torch.cuda.get_device_properties(index).total_memory
+        if reserve>=total:raise ValueError(f"GPU headroom exceeds cuda:{index} capacity")
+        result[index]=total-reserve
+    return result
 
 
 def inspect(model, layer_index: int) -> dict:
