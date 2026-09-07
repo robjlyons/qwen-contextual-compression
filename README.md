@@ -156,3 +156,48 @@ analysis artifacts and plots under suffixed names. Retentions are canonicalised
 to six decimal places before every group, pivot, threshold, bootstrap, and report
 lookup. Analysis accepts only raw `oracle/layer_NNN.csv` files; diagnostic
 `layer_NNN.stability.csv` files are deliberately excluded.
+
+## End-to-end propagated oracle
+
+Phase 3 patches only discovered MLP modules in one official, fully dispatched
+Qwen model. Dense and sparse teacher-forced passes use identical prompt positions;
+the sparse wrapper receives only its current trajectory input and masks the
+down-projection activation in a pre-hook, preserving Accelerate offload hooks.
+The dense reference is held only for the matching prompt, reduced to compact
+metrics, and discarded. A mandatory 100% wrapper control blocks every sparse
+schedule unless FFN outputs, hidden states, logits, KL, and top-1 predictions match.
+
+Validate the wrapper first:
+
+```bash
+python scripts/validate_sparse_wrapper.py --model Qwen/Qwen3.8-27B \
+  --device-map auto --offload-folder offload/qwen38
+```
+
+Run the ordered 250-token smoke controls on a genuinely held-out corpus:
+
+```bash
+python scripts/run_end_to_end_oracle.py --model Qwen/Qwen3.8-27B \
+  --input /path/to/heldout.jsonl --max-eval-tokens 250 \
+  --schedules dense,measured_conservative,measured_moderate,all_conservative,all_moderate \
+  --device-map auto --offload-folder offload/qwen38 \
+  --output-dir results/end_to_end
+python scripts/analyse_end_to_end.py --results-dir results/end_to_end
+```
+
+If wrapper validation and smoke metrics are sound, increase only the token limit:
+
+```bash
+python scripts/run_end_to_end_oracle.py --model Qwen/Qwen3.8-27B \
+  --input /path/to/heldout.jsonl --max-eval-tokens 2000 \
+  --schedules dense,measured_conservative,measured_moderate,all_conservative,all_moderate \
+  --device-map auto --offload-folder offload/qwen38 \
+  --output-dir results/end_to_end_2000
+python scripts/analyse_end_to_end.py --results-dir results/end_to_end_2000
+```
+
+Completed schedule CSVs are resume markers; use `--force` to replace them. Add
+aggressive/uniform schedules or `--generation` only after the initial controls.
+`schedule_expansions.json` records all per-layer retentions and theoretical active
+parameter equivalents. These are **not actual VRAM or speedups**: the oracle still
+executes dense gate/up projections and ordinary dense PyTorch operations.
