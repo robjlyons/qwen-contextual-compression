@@ -1,0 +1,19 @@
+model: Qwen/Qwen3.8-27B
+layer: 0
+importance: weighted_activation
+mask_retention: [0.20, 0.30, 0.40, 0.50]
+clustering_retention: 0.40
+calibration_fraction: 0.80
+signature_dimensions: 64
+similarity: jaccard
+top_neighbours: 32
+min_affinity: 0.05
+group_size: 64
+block_sizes: [16, 32, 64, 128]
+sweep_retention: [0.30, 0.40, 0.50]
+budget_modes: [equal_budget, equal_coverage]
+coverage_target: 0.99
+hot_threshold: 0.75
+cold_threshold: 0.10
+bootstrap_repeats: 2000
+seed: 42
