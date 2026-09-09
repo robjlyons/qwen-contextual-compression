@@ -1,0 +1,13 @@
+layers: [0, 40, 63]
+retention: [0.30, 0.40, 0.50, 0.60, 0.75]
+latent_dimensions: [64, 128, 256]
+loss: distribution_ce
+target_transform: distribution
+split: [0.70, 0.15, 0.15]
+seed: 42
+epochs: 100
+batch_size: 32
+learning_rate: 0.001
+weight_decay: 0.0001
+dropout: 0.1
+patience: 10

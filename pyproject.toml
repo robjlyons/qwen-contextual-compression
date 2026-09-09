@@ -14,7 +14,7 @@ datasets = ["datasets>=3"]
 test = ["pytest>=8"]
 
 [tool.setuptools.packages.find]
-include = ["extract*", "oracle*", "evaluation*", "clustering*", "end_to_end*"]
+include = ["extract*", "oracle*", "evaluation*", "clustering*", "end_to_end*", "predictor*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

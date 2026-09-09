@@ -219,3 +219,32 @@ aggressive/uniform schedules or `--generation` only after the initial controls.
 `schedule_expansions.json` records all per-layer retentions and theoretical active
 parameter equivalents. These are **not actual VRAM or speedups**: the oracle still
 executes dense gate/up projections and ordinary dense PyTorch operations.
+
+## Phase 4: learned pre-FFN selector
+
+Phase 4 uses only stored pre-FFN states plus one selectively materialised layer;
+it never loads the full 27B model. On an 8 GB RTX 3070 Ti, build targets one
+layer at a time, then train the factorised baselines independently:
+
+```bash
+python scripts/build_predictor_targets.py --model Qwen/Qwen3.8-27B \
+  --activation-dir results/multilayer_2000/activations --layers 0,40,63 \
+  --output-dir results/predictor --device cuda
+for layer in 0 40 63; do
+  for dim in 64 128 256; do
+    python scripts/train_predictor.py --results-dir results/predictor \
+      --layer $layer --model factorized --latent-dim $dim \
+      --loss distribution_ce --device cuda
+    python scripts/evaluate_predictor.py --results-dir results/predictor \
+      --layer $layer --model factorized --latent-dim $dim \
+      --retention .3,.4,.5,.6,.75 --device cuda
+  done
+done
+python scripts/compare_predictors.py --results-dir results/predictor
+```
+
+Use `--device cpu` (or `mps`) for local alternatives. Splits are persisted by
+prompt, input standardisation is fitted on train only, and checkpoints include
+model/optimizer state and normalisation. Predictor `forward(x)` receives only the
+pre-FFN state. Target construction alone evaluates gate/up/down-derived oracle
+labels; runtime predictor evaluation never supplies those values to the model.
