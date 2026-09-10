@@ -1,4 +1,4 @@
-import inspect,torch
+import inspect,json,pytest,torch
 from torch import nn
 from predictor.accounting import predictor_accounting
 from predictor.confidence import fallback_retention
@@ -8,6 +8,7 @@ from predictor.metrics import reconstruct_metrics,select_topk,selection_metrics
 from predictor.models import FactorizedPredictor,StaticHot
 from predictor.targets import oracle_scores
 from predictor.xgboost_latent import TargetSVD
+from predictor.evaluation import normalise_inputs,prepare_evaluation
 from extract.extract_ffn import locate_ffn
 from conftest import Model
 def test_target_formula_and_predictor_antileakage():
@@ -26,3 +27,21 @@ def test_reconstruction_and_distribution_loss():
  a=torch.randn(2,5);w=torch.randn(3,5);idx=torch.tensor([[0,2],[1,4]]);metrics=reconstruct_metrics(a,w,idx);manual=torch.nn.functional.linear(torch.zeros_like(a).scatter_(1,idx,a.gather(1,idx)),w);dense=torch.nn.functional.linear(a,w);torch.testing.assert_close(metrics["mse"],(dense-manual).square().mean(-1));assert torch.isfinite(distribution_ce(torch.randn(2,5),a.abs()))
 def test_train_only_svd_and_fallback_average():
  train=torch.randn(20,10);validation=torch.randn(5,10)+100;codec=TargetSVD(3).fit(train);torch.testing.assert_close(codec.mean,train.mean(0));r=fallback_retention(torch.tensor([0.,1.]),.5,.1,.5);assert float(r.mean())==torch.tensor(.55).item()
+
+def _evaluation_fixture(tmp_path):
+ target=tmp_path/"layer_000/targets";run=tmp_path/"layer_000/factorized_d3";target.mkdir(parents=True);run.mkdir();inputs=torch.tensor([[1.,2.,3.,4.],[2.,4.,6.,8.],[3.,6.,9.,12.],[4.,8.,12.,16.]])
+ raw=torch.tensor([[9.,1.,0.,0.,0.,0.],[8.,1.,0.,0.,0.,0.],[0.,9.,1.,0.,0.,0.],[0.,8.,1.,0.,0.,0.]])
+ torch.save({"inputs":inputs,"scores":raw.half(),"raw_scores":raw.half(),"gated_activations":torch.randn(4,6)},target/"targets.pt");torch.save({"weight":torch.randn(2,6),"bias":None},target/"down_projection.pt");(run.parent/"splits.json").write_text(json.dumps({"train":[0,1],"validation":[],"test":[2,3]}));model=FactorizedPredictor(4,6,3);torch.save({"model":model.state_dict(),"mean":torch.tensor([1.,2.,3.,4.]),"std":torch.tensor([0.,2.,3.,4.]),"config":{"kind":"factorized","latent_dim":3}},run/"best.pt");return target,run
+
+def test_cpu_checkpoint_and_dataset_are_prepared_on_cpu_without_leakage(tmp_path):
+ target,run=_evaluation_fixture(tmp_path);data,model,tensors,diagnostics=prepare_evaluation(target,run,"cpu");assert all(value.device.type=="cpu" for value in tensors.values() if isinstance(value,torch.Tensor));assert torch.isfinite(tensors["x"]).all();torch.testing.assert_close(tensors["static"],data["raw_scores"][:2].float().mean(0));assert diagnostics["test_samples"]==2
+
+def test_normalisation_uses_checkpoint_statistics_and_clamps_zero_std():
+ x=torch.tensor([[2.,6.]]);normalised,mean,std=normalise_inputs(x,torch.tensor([1.,2.]),torch.tensor([0.,2.]),"cpu");torch.testing.assert_close(normalised,torch.tensor([[1e6,2.]]));assert torch.isfinite(normalised).all()
+
+@pytest.mark.skipif(not torch.cuda.is_available(),reason="CUDA unavailable")
+def test_cpu_artifacts_move_explicitly_to_cuda(tmp_path):
+ target,run=_evaluation_fixture(tmp_path);_data,model,tensors,_diagnostics=prepare_evaluation(target,run,"cuda:0");assert next(model.parameters()).is_cuda and all(value.is_cuda for value in tensors.values() if isinstance(value,torch.Tensor))
+
+def test_missing_evaluation_file_has_clear_path(tmp_path):
+ with pytest.raises(FileNotFoundError,match="targets.pt"):prepare_evaluation(tmp_path,tmp_path/"run","cpu")
