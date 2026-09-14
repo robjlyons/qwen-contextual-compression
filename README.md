@@ -248,3 +248,23 @@ prompt, input standardisation is fitted on train only, and checkpoints include
 model/optimizer state and normalisation. Predictor `forward(x)` receives only the
 pre-FFN state. Target construction alone evaluates gate/up/down-derived oracle
 labels; runtime predictor evaluation never supplies those values to the model.
+
+Layer-0 output-aware training reuses `targets.pt`, `down_projection.pt`, and the
+unchanged prompt split. It creates/reuses `dense_ffn_outputs.pt` without loading
+Qwen. The initial fixed-50% experiment is:
+
+```bash
+for loss in output_cosine output_relative output_hybrid output_hybrid_rank; do
+  python scripts/train_predictor.py --results-dir results/predictor_2000 \
+    --layer 0 --model factorized --latent-dim 64 --loss "$loss" \
+    --train-retention .5 --ste-temperature-start 1 --ste-temperature-end .1 \
+    --batch-size 16 --device cuda
+  python scripts/evaluate_predictor.py --results-dir results/predictor_2000 \
+    --layer 0 --model factorized --latent-dim 64 --loss "$loss" \
+    --retention .3,.4,.5,.6,.75 --device cuda
+done
+```
+
+Training uses exact hard Top-K in the forward pass and a sigmoid straight-through
+gradient; evaluation always uses ordinary hard Top-K. The full down projection is
+a training-only reconstruction cost and is not included in selector runtime cost.

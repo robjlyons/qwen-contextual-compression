@@ -36,16 +36,17 @@ def prepare_evaluation(target_dir:Path,run_dir:Path,device="cpu"):
  expected=x.device;mismatches={name:str(value.device) for name,value in tensors.items() if isinstance(value,torch.Tensor) and value.device!=expected}
  if next(model.parameters()).device!=expected:mismatches["model"]=str(next(model.parameters()).device)
  if mismatches:raise RuntimeError(f"Predictor evaluation device mismatch; expected {expected}: {mismatches}")
- diagnostics={"device":str(device),"model_device":str(next(model.parameters()).device),"inputs_source_device":str(data["inputs"].device),"x_compute_device":str(x.device),"mean_device":str(mean.device),"std_device":str(std.device),"target_device":str(target.device),"gated_activations_device":str(activations.device),"down_projection_device":str(down_weight.device),"test_samples":len(test_ids)};print("Predictor evaluation\n"+json.dumps(diagnostics,indent=2));return data,model,tensors,diagnostics
+ diagnostics={"device":str(device),"model_device":str(next(model.parameters()).device),"inputs_source_device":str(data["inputs"].device),"x_compute_device":str(x.device),"mean_device":str(mean.device),"std_device":str(std.device),"target_device":str(target.device),"gated_activations_device":str(activations.device),"down_projection_device":str(down_weight.device),"test_samples":len(test_ids),"config":config};print("Predictor evaluation\n"+json.dumps(diagnostics,indent=2));return data,model,tensors,diagnostics
 
 def evaluate(target_dir:Path,run_dir:Path,retentions,device="cpu"):
- data,model,t,diagnostics=prepare_evaluation(target_dir,run_dir,device);rows=[]
+ data,model,t,diagnostics=prepare_evaluation(target_dir,run_dir,device);rows=[];samples=[]
  with torch.inference_mode():
   pred=model(t["x"])
   for r in retentions:
    for method,ranking in (("predictor",pred),("oracle",t["target"]),("static",t["static"].expand_as(t["target"]))):
-    m=selection_metrics(ranking,t["target"],r);recon=reconstruct_metrics(t["activations"],t["down_weight"],m["indices"],t["down_bias"]);row={"method":method,"retention":r,**{k:float(v.mean()) for k,v in m.items() if k!="indices"},"ffn_cosine":float(recon["cosine_similarity"].mean()),"ffn_cosine_p01":float(recon["cosine_similarity"].quantile(.01)),"ffn_cosine_p05":float(recon["cosine_similarity"].quantile(.05)),"relative_l2":float(recon["relative_l2"].mean()),"relative_l2_p95":float(recon["relative_l2"].quantile(.95)),"relative_l2_p99":float(recon["relative_l2"].quantile(.99)),**predictor_accounting(model,t["x"].shape[1],t["target"].shape[1],r)};rows.append(row)
- (run_dir/"metrics.json").write_text(json.dumps({"device_diagnostics":diagnostics,"rows":rows,"latency":benchmark(model,data["inputs"].float(),device)},indent=2)+"\n");return rows
+    m=selection_metrics(ranking,t["target"],r);recon=reconstruct_metrics(t["activations"],t["down_weight"],m["indices"],t["down_bias"]);config=diagnostics["config"];row={"model":config["kind"],"loss":config["loss"],"train_retention":config.get("train_retention",.5),"method":method,"retention":r,**{k:float(v.mean()) for k,v in m.items() if k!="indices"},"ffn_cosine":float(recon["cosine_similarity"].mean()),"ffn_cosine_p01":float(recon["cosine_similarity"].quantile(.01)),"ffn_cosine_p05":float(recon["cosine_similarity"].quantile(.05)),"relative_l2":float(recon["relative_l2"].mean()),"relative_l2_p95":float(recon["relative_l2"].quantile(.95)),"relative_l2_p99":float(recon["relative_l2"].quantile(.99)),**predictor_accounting(model,t["x"].shape[1],t["target"].shape[1],r)};rows.append(row)
+    if method=="predictor":samples.extend({"sample":i,"retention":r,"cosine":float(recon["cosine_similarity"][i]),"relative_l2":float(recon["relative_l2"][i]),"captured_mass":float(m["captured_mass"][i])} for i in range(len(t["x"])))
+ (run_dir/"per_sample.jsonl").write_text("".join(json.dumps(row)+"\n" for row in samples));(run_dir/"metrics.json").write_text(json.dumps({"device_diagnostics":diagnostics,"rows":rows,"latency":benchmark(model,data["inputs"].float(),device)},indent=2)+"\n");return rows
 
 def evaluate_static(target_dir:Path,run_dir:Path,retentions):
  target_path=target_dir/"targets.pt";meta_path=target_dir/"sample_metadata.jsonl";_required(target_path,meta_path);data=torch.load(target_path,map_location="cpu",weights_only=True);split_path=run_dir.parent/"splits.json"
