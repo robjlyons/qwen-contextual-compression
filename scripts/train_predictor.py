@@ -1,0 +1,8 @@
+#!/usr/bin/env python
+import argparse
+from pathlib import Path
+import _bootstrap
+from predictor.training import train
+def main(argv=None):
+ p=argparse.ArgumentParser();p.add_argument("--results-dir",type=Path,required=True);p.add_argument("--layer",type=int,required=True);p.add_argument("--model",choices=["factorized","mlp"],default="factorized");p.add_argument("--latent-dim",type=int,default=128);p.add_argument("--loss",default="distribution_ce");p.add_argument("--device",default="cuda");p.add_argument("--epochs",type=int,default=100);p.add_argument("--batch-size",type=int,default=16);p.add_argument("--train-retention",type=float,default=.5);p.add_argument("--ste-temperature-start",type=float,default=1.);p.add_argument("--ste-temperature-end",type=float,default=.1);p.add_argument("--ste-normalize-logits",action=argparse.BooleanOptionalAction,default=True);p.add_argument("--amp",action=argparse.BooleanOptionalAction,default=True);p.add_argument("--cosine-weight",type=float,default=1.);p.add_argument("--relative-weight",type=float,default=.25);p.add_argument("--ranking-weight",type=float,default=.05);a,_=p.parse_known_args(argv);name=f"{a.model}_d{a.latent_dim}_{a.loss}";print(train(a.results_dir/f"layer_{a.layer:03d}/targets",a.results_dir/f"layer_{a.layer:03d}/{name}",a.model,a.latent_dim,a.loss,a.device,a.epochs,a.batch_size,train_retention=a.train_retention,temperature_start=a.ste_temperature_start,temperature_end=a.ste_temperature_end,ste_normalize=a.ste_normalize_logits,cosine_weight=a.cosine_weight,relative_weight=a.relative_weight,ranking_weight=a.ranking_weight,amp=a.amp))
+if __name__=="__main__":main()
