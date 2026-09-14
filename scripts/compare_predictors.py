@@ -1,21 +1,21 @@
 #!/usr/bin/env python
+"""Build a compact architecture/stage quality and compute comparison."""
 import argparse,json
 from pathlib import Path
 import pandas as pd
-import matplotlib.pyplot as plt
 import _bootstrap
+
 def main(argv=None):
- p=argparse.ArgumentParser();p.add_argument("--results-dir",type=Path,required=True);a,_=p.parse_known_args(argv);rows=[]
- for path in a.results_dir.glob("layer_*/*/metrics.json"):
-  data=json.loads(path.read_text());layer=int(path.parents[1].name.split("_")[-1]);rows.extend({"layer":layer,"predictor":path.parent.name,**row} for row in data["rows"])
+ p=argparse.ArgumentParser();p.add_argument("--results-dir",type=Path,required=True);p.add_argument("--layer",type=int,default=0);p.add_argument("--retention",type=float,default=.5);a=p.parse_args(argv);rows=[]
+ for path in a.results_dir.glob(f"layer_{a.layer:03d}/*/metrics.json"):
+  data=json.loads(path.read_text())
+  for row in data.get("rows",[]):
+   if abs(row.get("retention",-1)-a.retention)<1e-9:rows.append({"run":path.parent.name,**row})
  frame=pd.DataFrame(rows)
+ columns=["run","model","latent_dim","stage","method","predictor_mac_fraction","ffn_cosine","ffn_cosine_p01","ffn_cosine_p05","relative_l2","relative_l2_p95","relative_l2_p99","captured_mass"]
  if len(frame):
-  frame["oracle_cosine"]=frame.apply(lambda r:frame[(frame.layer==r.layer)&(frame.predictor==r.predictor)&(frame.method=="oracle")&(frame.retention==r.retention)].ffn_cosine.iloc[0],axis=1)
-  def overhead(row):
-   candidates=frame[(frame.layer==row.layer)&(frame.predictor==row.predictor)&(frame.method=="predictor")&(frame.ffn_cosine>=row.oracle_cosine)];return float(candidates.retention.min()-row.retention) if len(candidates) else float("nan")
-  frame["retention_overhead"]=frame.apply(overhead,axis=1);plots=a.results_dir/"plots";plots.mkdir(exist_ok=True)
-  for metric,name in (("captured_mass","importance_mass.png"),("ffn_cosine","ffn_cosine.png"),("relative_l2","relative_l2.png")):
-   for keys,g in frame.groupby(["layer","predictor","method"]):plt.plot(g.retention,g[metric],label="/".join(map(str,keys)))
-   plt.xlabel("Retention");plt.ylabel(metric);plt.legend(fontsize=5);plt.tight_layout();plt.savefig(plots/name,dpi=160);plt.close()
- frame.to_csv(a.results_dir/"cross_layer_summary.csv",index=False);print(frame.to_string(index=False))
+  for column in columns:
+   if column not in frame:frame[column]=None
+  frame=frame[columns].sort_values(["method","ffn_cosine"],ascending=[True,False])
+ frame.to_csv(a.results_dir/f"layer_{a.layer:03d}_phase43_comparison.csv",index=False);print(frame.to_string(index=False))
 if __name__=="__main__":main()

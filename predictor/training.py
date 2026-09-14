@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from predictor.datasets import prompt_split
 from predictor.losses import distribution_ce, score_loss
 from predictor.metrics import selection_metrics
-from predictor.models import FactorizedPredictor, LowRankMLP
+from predictor.models import architecture_metadata, create_predictor
 from predictor.output_aware import (
     ensure_dense_output_cache,
     hard_topk_mask,
@@ -31,8 +31,7 @@ OUTPUT_LOSSES = {"output_cosine", "output_relative", "output_hybrid", "output_hy
 
 
 def build_model(kind, input_dim, output_dim, latent_dim, dropout=0.0):
-    cls = FactorizedPredictor if kind == "factorized" else LowRankMLP
-    return cls(input_dim, output_dim, latent_dim, dropout)
+    return create_predictor(kind, input_dim, output_dim, latent_dim, dropout)
 
 
 def load_initial_checkpoint(model, path, expected, device="cpu"):
@@ -49,6 +48,8 @@ def load_initial_checkpoint(model, path, expected, device="cpu"):
         "input_dim": config.get("input_dim", checkpoint["mean"].numel()),
         "output_dim": config.get("output_dim", output_weights[-1].shape[0]),
     }
+    for key in ("activation", "residual_depth", "layer_norm"):
+        actual[key] = config.get(key)
     mismatches = {key: (actual[key], value) for key, value in expected.items() if actual[key] != value}
     if mismatches:
         raise ValueError(f"Initialization checkpoint architecture mismatch: {mismatches}")
@@ -121,7 +122,7 @@ def train(target_dir: Path, run_dir: Path, kind="factorized", latent_dim=128, lo
     x, y, gated = data["inputs"].float(), data["scores"].float(), data["gated_activations"]
     tr, vi = torch.tensor(splits["train"]), torch.tensor(splits["validation"])
     model = build_model(kind, x.shape[1], y.shape[1], latent_dim, dropout)
-    expected = {"kind": kind, "latent_dim": latent_dim, "input_dim": x.shape[1], "output_dim": y.shape[1]}
+    expected = architecture_metadata(model, kind, x.shape[1], y.shape[1], latent_dim)
     normalization_source = "new_training_run"
     if init_checkpoint:
         mean, std, _ = load_initial_checkpoint(model, init_checkpoint, expected)
@@ -182,7 +183,7 @@ def train(target_dir: Path, run_dir: Path, kind="factorized", latent_dim=128, lo
             optimizer.zero_grad()
             objective.backward()
             optimizer.step()
-            total += float(objective) * len(ids)
+            total += float(objective.detach()) * len(ids)
         model.eval()
         if output_aware:
             validation = _validation(model, x, gated, dense, weight, bias, vi, mean, std, train_retention, device, batch_size)
