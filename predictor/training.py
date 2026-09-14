@@ -19,6 +19,13 @@ from predictor.output_aware import (
     reconstruct,
     ste_topk_mask,
 )
+from predictor.reproducibility import (
+    epoch_permutation,
+    normalization_metadata,
+    set_global_seed,
+    split_metadata,
+    write_run_config,
+)
 
 OUTPUT_LOSSES = {"output_cosine", "output_relative", "output_hybrid", "output_hybrid_rank"}
 
@@ -96,9 +103,9 @@ def _validation(model, x, gated, dense, weight, bias, ids, mean, std, retention,
     return metrics
 
 
-def train(target_dir: Path, run_dir: Path, kind="factorized", latent_dim=128, loss="distribution_ce", device="cpu", epochs=100, batch_size=16, lr=None, weight_decay=1e-4, dropout=.1, patience=10, seed=42, train_retention=.5, temperature_start=1., temperature_end=.1, ste_normalize=True, cosine_weight=1., relative_weight=.25, ranking_weight=.05, amp=True, init_checkpoint=None, freeze_encoder_epochs=0, min_validation_p01=None, overwrite=False):
+def train(target_dir: Path, run_dir: Path, kind="factorized", latent_dim=128, loss="distribution_ce", device="cpu", epochs=100, batch_size=16, lr=None, weight_decay=1e-4, dropout=.1, patience=10, seed=42, train_retention=.5, temperature_start=1., temperature_end=.1, ste_normalize=True, cosine_weight=1., relative_weight=.25, ranking_weight=.05, amp=True, init_checkpoint=None, freeze_encoder_epochs=0, min_validation_p01=None, overwrite=False, early_stopping=True, checkpoint_objective=None, shuffle_strategy="global_rng_torch_randperm"):
     started = time.perf_counter()
-    torch.manual_seed(seed)
+    set_global_seed(seed)
     target_dir, run_dir = Path(target_dir), Path(run_dir)
     if run_dir.exists() and any(run_dir.iterdir()) and not (run_dir / "latest.pt").exists() and not overwrite:
         raise FileExistsError(f"Refusing to overwrite existing predictor run: {run_dir}")
@@ -129,6 +136,18 @@ def train(target_dir: Path, run_dir: Path, kind="factorized", latent_dim=128, lo
     latest = run_dir / "latest.pt"
     start, best_metrics, wait = 0, None, 0
     output_aware = loss in OUTPUT_LOSSES
+    checkpoint_objective = checkpoint_objective or ("validation_output_score" if output_aware else "validation_captured_mass")
+    audit_config = {
+        **expected, "seed": seed, "epochs": epochs, "batch_size": batch_size,
+        "learning_rate": effective_lr, "optimizer": "AdamW", "weight_decay": weight_decay,
+        "scheduler": "none", "patience": patience, "early_stopping": early_stopping,
+        "checkpoint_objective": checkpoint_objective, "amp": amp, "dropout": dropout,
+        "normalization_source": normalization_source, "shuffle_seed": seed,
+        "shuffle": shuffle_strategy, "target_tensor": "scores",
+        "target_interpretation": "per_token_importance_distribution",
+        **split_metadata(splits), "normalization_statistics": normalization_metadata(mean, std),
+    }
+    write_run_config(run_dir, audit_config)
     weight = bias = dense = None
     if output_aware:
         cache = ensure_dense_output_cache(target_dir, device, batch_size)
@@ -146,7 +165,7 @@ def train(target_dir: Path, run_dir: Path, kind="factorized", latent_dim=128, lo
     for epoch in range(start, epochs):
         set_encoder_frozen(model, epoch < freeze_encoder_epochs)
         model.train()
-        permutation, total = tr[torch.randperm(len(tr))], 0.0
+        permutation, total = epoch_permutation(tr, seed, epoch, shuffle_strategy), 0.0
         temperature = temperature_start + (temperature_end - temperature_start) * (epoch / max(epochs - 1, 1))
         for ids in permutation.split(batch_size):
             inputs, target = ((x[ids] - mean) / std).to(device), y[ids].to(device)
@@ -169,8 +188,12 @@ def train(target_dir: Path, run_dir: Path, kind="factorized", latent_dim=128, lo
             validation = _validation(model, x, gated, dense, weight, bias, vi, mean, std, train_retention, device, batch_size)
         else:
             with torch.inference_mode():
-                mass = selection_metrics(model(((x[vi] - mean) / std).to(device)), y[vi].to(device), train_retention)["captured_mass"].mean()
-            validation = {"captured_mass": float(mass), "score": float(mass)}
+                validation_logits = model(((x[vi] - mean) / std).to(device))
+                validation_target = y[vi].to(device)
+                mass = selection_metrics(validation_logits, validation_target, train_retention)["captured_mass"].mean()
+                validation_loss = distribution_ce(validation_logits, validation_target)
+            score = float(mass) if checkpoint_objective == "validation_captured_mass" else -float(validation_loss)
+            validation = {"captured_mass": float(mass), "validation_distribution_ce": float(validation_loss), "score": score}
         history.append({"epoch": epoch, "temperature": temperature, "train_loss": total / max(len(tr), 1), **validation})
         config = {**expected, "loss": loss, "seed": seed, "train_retention": train_retention, "ste_normalize": ste_normalize, "temperature_start": temperature_start, "temperature_end": temperature_end, "cosine_weight": cosine_weight, "relative_weight": relative_weight, "ranking_weight": ranking_weight, "amp": amp, "lr": effective_lr, "freeze_encoder_epochs": freeze_encoder_epochs, "normalization_source": normalization_source, "init_checkpoint": str(init_checkpoint) if init_checkpoint else None}
         candidate = {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "epoch": epoch, "best_metrics": validation, "mean": mean, "std": std, "config": config, "initial_validation": initial_validation}
@@ -180,7 +203,7 @@ def train(target_dir: Path, run_dir: Path, kind="factorized", latent_dim=128, lo
             torch.save(candidate, run_dir / "best.pt")
         else:
             wait += 1
-        if wait >= patience:
+        if early_stopping and wait >= patience:
             break
     (run_dir / "history.json").write_text(json.dumps(history, indent=2) + "\n")
     return {"best_validation": best_metrics, "initial_validation": initial_validation, "epochs": len([h for h in history if h["epoch"] >= 0]), "training_seconds": time.perf_counter() - started, "batch_size": batch_size, "normalization_source": normalization_source, "splits": {key: len(value) for key, value in splits.items()}}
