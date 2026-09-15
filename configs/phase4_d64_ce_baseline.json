@@ -1,0 +1,21 @@
+{
+  "amp": true,
+  "batch_size": 16,
+  "checkpoint_objective": "validation_captured_mass",
+  "dropout": 0.1,
+  "early_stopping": true,
+  "epochs": 100,
+  "latent_dim": 64,
+  "learning_rate": 0.001,
+  "loss": "distribution_ce",
+  "model": "factorized",
+  "normalization": "train_split_mean_std",
+  "optimizer": "AdamW",
+  "patience": 10,
+  "scheduler": "none",
+  "seed": 42,
+  "shuffle": "global_rng_torch_randperm",
+  "target_interpretation": "per_token_importance_distribution",
+  "target_tensor": "scores",
+  "weight_decay": 0.0001
+}
