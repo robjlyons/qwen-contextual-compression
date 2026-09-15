@@ -11,6 +11,8 @@ def main(argv=None):
   data=json.loads(path.read_text())
   for row in data.get("rows",[]):
    if abs(row.get("retention",-1)-a.retention)<1e-9:rows.append({"run":path.parent.name,**row})
+ for path in a.results_dir.glob(f"layer_{a.layer:03d}/*/evaluation.json"):
+  data=json.loads(path.read_text());metrics=data["metrics"];accounting=data["accounting"];config=data["config"];rows.append({"run":path.parent.name,"model":"candidate_reranker","latent_dim":config["rerank_dim"],"stage":"fine_tuned" if config.get("init_checkpoint") else "ce","method":"predictor","predictor_mac_fraction":accounting["total_mac_fraction"],**metrics})
  frame=pd.DataFrame(rows)
  columns=["run","model","latent_dim","stage","method","predictor_mac_fraction","ffn_cosine","ffn_cosine_p01","ffn_cosine_p05","relative_l2","relative_l2_p95","relative_l2_p99","captured_mass"]
  if len(frame):
