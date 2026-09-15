@@ -40,3 +40,25 @@ The optional `0.02` ranking regularizer should be run only if the output-only
 validation result is useful. Earlier phases repeatedly inspected the test set;
 that limitation must accompany final test results even though Phase 4.5 model
 selection itself uses validation only.
+
+## Phase 4.6 pairwise swap supervision
+
+`build_boundary_pair_targets.py` derives compact, sample-owned swap pairs from
+the existing gated activations and down projection. It shortlists 32 removable
+and 64 addable boundary neurons, then evaluates their exact squared-error gains
+without materialising a `[32, 64, hidden]` tensor. These artifacts are
+training-only; inference remains the unchanged x-only boundary cascade.
+
+```bash
+python scripts/build_boundary_pair_targets.py --results-dir results/predictor_2000 \
+  --layer 0 --stage1-run residual_factorized_d32_ce_to_hybrid_rank_rw010 \
+  --device cuda
+python scripts/train_boundary_pairwise.py --results-dir results/predictor_2000 \
+  --layer 0 --stage1-run residual_factorized_d32_ce_to_hybrid_rank_rw010 \
+  --pair-target-dir results/predictor_2000/layer_000/boundary_pair_targets \
+  --run-name boundary_l45_c65_r16_pairwise --device cuda
+```
+
+Pairwise checkpoints are selected by validation FFN reconstruction score, not
+pair classification loss or test data. Final evaluation uses the existing
+`evaluate_boundary_reranker.py` command.

@@ -38,6 +38,14 @@ class BoundarySwapReranker(nn.Module):
     def score_parts(self,x,boundary_ids,boundary_scores):
         query=torch.nn.functional.silu(self.context(x));delta=torch.einsum("bdr,br->bd",self.neuron_embeddings(boundary_ids),query);base=self.normalized_base(boundary_scores);return base,delta,self.alpha*delta
 
+    def score_ids(self,x,neuron_ids,stage1_scores,boundary_scores):
+        """Score arbitrary boundary IDs using the full boundary normalization."""
+        raw=stage1_scores.gather(-1,neuron_ids)
+        if self.normalize_stage1_scores:
+            raw=(raw-boundary_scores.mean(-1,keepdim=True))/boundary_scores.std(-1,keepdim=True,unbiased=False).clamp_min(1e-6)
+        query=torch.nn.functional.silu(self.context(x));delta=torch.einsum("bpr,br->bp",self.neuron_embeddings(neuron_ids),query)
+        return raw+self.alpha*delta
+
     def forward(self,x,boundary_ids,boundary_scores):
         base,_,correction=self.score_parts(x,boundary_ids,boundary_scores);return base+correction
 
