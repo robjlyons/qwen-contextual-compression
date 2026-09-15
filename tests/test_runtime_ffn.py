@@ -30,4 +30,4 @@ def test_fp16_cuda_dynamic_smoke():
 
 @pytest.mark.skipif(not (torch.cuda.is_available() and TRITON_AVAILABLE),reason="CUDA/Triton unavailable")
 def test_triton_matches_dynamic():
- gate,up,down,x=(value.half().cuda() for value in tensors());ids=torch.tensor([1,3,4,8,9,11],device="cuda");reference=TorchDynamicSparseFFN(gate,up,down)(x,ids);torch.testing.assert_close(triton_indexed_ffn(x,ids,gate,up,down),reference,rtol=.02,atol=.02)
+ gate,up,down,x=(value.half().cuda() for value in tensors());ids=torch.tensor([1,3,4,8,9,11],device="cuda");reference=TorchDynamicSparseFFN(gate,up,down)(x,ids);torch.testing.assert_close(triton_indexed_ffn(x,ids,gate,up,down),reference,rtol=.02,atol=.02);torch.testing.assert_close(triton_indexed_ffn(x,ids,gate,up,down.T.contiguous(),True),reference,rtol=.02,atol=.02)

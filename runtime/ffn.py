@@ -41,3 +41,8 @@ class TorchDynamicSparseFFN(nn.Module):
 
 def masked_dense_reference(x,selected_ids,gate_weight,up_weight,down_weight):
     gate=F.linear(x,gate_weight);up=F.linear(x,up_weight);activation=F.silu(gate)*up;mask=torch.zeros_like(activation).scatter_(-1,selected_ids.expand(x.shape[0],-1),1);return F.linear(activation*mask,down_weight)
+
+def neuron_major_down(activation,selected_ids,down_t):
+    """Reference for persistent neuron-major [I,H] down storage."""
+    if down_t.ndim!=2:raise ValueError("down_t must be [intermediate, hidden]")
+    return activation@down_t.index_select(0,selected_ids)

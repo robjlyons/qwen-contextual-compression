@@ -16,11 +16,14 @@ ROLES = ("gate_proj.weight", "up_proj.weight", "down_proj.weight")
 
 
 def resolve_ffn_tensor_names(weight_map: dict[str, str], layer: int) -> dict[str, str]:
-    """Resolve unique HF-style MLP tensors without assuming a backbone prefix."""
+    """Resolve the main language-model MLP, explicitly excluding Qwen MTP."""
     result = {}
     marker = f".layers.{layer}.mlp."
     for role in ROLES:
-        matches = [name for name in weight_map if marker in name and name.endswith(f".{role}")]
+        matches = [name for name in weight_map if marker in name and name.endswith(f".{role}") and not name.startswith("mtp.") and ".mtp." not in name]
+        preferred = [name for name in matches if name.startswith("model.language_model.layers.")]
+        if preferred:
+            matches = preferred
         if len(matches) != 1:
             raise RuntimeError(f"Expected one layer-{layer} {role}; found {matches or '<none>'}")
         result[role] = matches[0]
@@ -81,3 +84,13 @@ def load_runtime_weights(path: Path, device="cpu") -> tuple[dict[str, torch.Tens
     with safe_open(path, framework="pt", device="cpu") as handle:
         metadata = handle.metadata() or {}
     return weights, metadata
+
+
+def save_neuron_major_layout(source: Path, output: Path) -> dict:
+    """Create an optional runtime artifact with contiguous per-neuron down rows."""
+    weights, metadata = load_runtime_weights(source, "cpu")
+    packed = {"gate_proj.weight": weights["gate_proj.weight"], "up_proj.weight": weights["up_proj.weight"], "down_t.weight": weights["down_proj.weight"].T.contiguous()}
+    output = Path(output);output.parent.mkdir(parents=True, exist_ok=True)
+    new_metadata = dict(metadata);new_metadata.update(runtime_layout="neuron_major_separate", down_layout="transposed_contiguous", source_artifact=str(source))
+    save_file(packed, output, metadata=new_metadata)
+    return {"output": str(output), "metadata": new_metadata}
