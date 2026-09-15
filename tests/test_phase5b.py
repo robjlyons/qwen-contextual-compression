@@ -3,7 +3,8 @@ from pathlib import Path
 import pytest,torch
 import runtime
 from predictor.models import ResidualFactorizedPredictor
-from runtime.cuda_indexed import CUDA_SOURCE,cuda_build_diagnostic,cuda_indexed_ffn
+from runtime.cuda_indexed import CPP_SOURCE,CUDA_SOURCE,cuda_build_diagnostic,cuda_indexed_ffn,validate_selected_ids
+from runtime.phase5c_benchmark import benchmark_orders
 from runtime.ffn import neuron_major_down
 from runtime.selector import RuntimeSelector,selected_set_comparison,selector_variants
 from runtime.temporal import neuron_payload,recover_sequence_metadata,simulate_lru_cache,temporal_mask_statistics
@@ -27,11 +28,23 @@ def test_transposed_down_matches_original():
  torch.manual_seed(3);down=torch.randn(5,12);ids=torch.tensor([1,4,7]);activation=torch.randn(2,3);expected=torch.nn.functional.linear(activation,down[:,ids]);torch.testing.assert_close(neuron_major_down(activation,ids,down.T.contiguous()),expected)
 
 def test_cuda_backend_is_materialization_free_and_skip_is_diagnostic():
- assert "index_select" not in CUDA_SOURCE;diagnostic=cuda_build_diagnostic();assert "available" in diagnostic
+ assert "index_select" not in CUDA_SOURCE;assert "torch/extension.h" not in CUDA_SOURCE;assert "<ATen/ATen.h>" in CUDA_SOURCE and "at::Tensor" in CUDA_SOURCE;assert "torch/extension.h" in CPP_SOURCE;assert "getCurrentCUDAStream" in CUDA_SOURCE and "C10_CUDA_KERNEL_LAUNCH_CHECK" in CUDA_SOURCE;diagnostic=cuda_build_diagnostic();assert "available" in diagnostic
+
+def test_id_validation_and_interleaving_are_deterministic():
+ validate_selected_ids(torch.tensor([0,2,4]),5,3,True)
+ with pytest.raises(ValueError,match="expected"):validate_selected_ids(torch.tensor([0,2]),5,3)
+ with pytest.raises(ValueError,match="range"):validate_selected_ids(torch.tensor([0,5]),5,2,True)
+ first=benchmark_orders(["dense","cuda","static"],7,42);assert first==benchmark_orders(["dense","cuda","static"],7,42);assert len(first)==7 and all(sorted(row)==["cuda","dense","static"] for row in first)
 
 @pytest.mark.skipif(not cuda_build_diagnostic()["available"],reason="CUDA extension toolchain unavailable")
 def test_cuda_indexed_original_and_transposed_match_reference():
  torch.manual_seed(8);x=torch.randn(1,32,device="cuda",dtype=torch.float16);gate=torch.randn(16,32,device="cuda",dtype=torch.float16);up=torch.randn_like(gate);down=torch.randn(32,16,device="cuda",dtype=torch.float16);ids=torch.tensor([1,3,7,9,12,15],device="cuda");activation=torch.nn.functional.silu(torch.nn.functional.linear(x,gate[ids]))*torch.nn.functional.linear(x,up[ids]);expected=torch.nn.functional.linear(activation,down[:,ids]);torch.testing.assert_close(cuda_indexed_ffn(x,ids,gate,up,down),expected,rtol=.03,atol=.03);torch.testing.assert_close(cuda_indexed_ffn(x,ids,gate,up,down.T.contiguous(),True),expected,rtol=.03,atol=.03)
+
+@pytest.mark.skipif(not cuda_build_diagnostic()["available"],reason="CUDA extension toolchain unavailable")
+def test_cuda_warp8_and_current_stream():
+ torch.manual_seed(9);x=torch.randn(1,32,device="cuda",dtype=torch.float16);gate=torch.randn(17,32,device="cuda",dtype=torch.float16);up=torch.randn_like(gate);down=torch.randn(32,17,device="cuda",dtype=torch.float16);ids=torch.tensor([1,3,7,9,12,15],device="cuda");stream=torch.cuda.Stream()
+ with torch.cuda.stream(stream):reference=cuda_indexed_ffn(x,ids,gate,up,down,variant="reference");optimized=cuda_indexed_ffn(x,ids,gate,up,down,variant="warp8")
+ stream.synchronize();torch.testing.assert_close(optimized,reference,rtol=.03,atol=.03)
 
 def metadata():return [{"sample":0,"prompt_id":"a","token_position":0},{"sample":1,"prompt_id":"a","token_position":1},{"sample":2,"prompt_id":"b","token_position":0},{"sample":3,"prompt_id":"b","token_position":2}]
 

@@ -70,3 +70,32 @@ python scripts/analyze_temporal_cache.py --results-dir results/predictor_2000 \
 
 The FreeToken Qwen3.6-NVFP4 result remains a separate full-model hardware
 reference and must not be compared to these Qwen3.8 single-layer FFN/s results.
+
+## Phase 5C interleaved benchmark
+
+`benchmark_phase5c.py` preserves the dense, static-packed, CUDA reference, and
+PyTorch baselines while adding a warp-reduction CUDA variant. The benchmark has
+a fixed-state compute-ceiling section and a decode-like section over the same
+validation-state sequence. Seven deterministically shuffled rounds are used by
+default, and raw distributions plus per-round means are saved separately.
+
+The CUDA translation unit deliberately uses ATen and c10 CUDA headers rather
+than `torch/extension.h`; only the C++ pybind translation unit includes the
+latter. Kernels launch on PyTorch's current CUDA stream and use
+`C10_CUDA_KERNEL_LAUNCH_CHECK` without synchronizing inside inference. A source
+hash is included in the extension name to prevent stale binary reuse.
+
+Windows builds require a Visual Studio x64 Developer Prompt, NVCC discoverable
+through `CUDA_HOME`, and Ninja. `TORCH_CUDA_ARCH_LIST=8.6` is optional for the
+RTX 3070 Ti when normal architecture discovery is unavailable.
+
+```bash
+python scripts/benchmark_phase5c.py --results-dir results/predictor_2000 \
+  --runtime-weights results/runtime_weights/layer_000.safetensors \
+  --stage1-run residual_factorized_d32_ce_to_hybrid_rank_rw010 \
+  --warmup 20 --iterations 100 --rounds 7 --seed 42 --device cuda
+```
+
+Every result is explicitly a single Qwen3.8 layer-0 FFN measurement. Static
+packing remains a non-contextual ceiling, and neither FFN/s nor layer latency is
+reported as full-model tokens/s or full-model VRAM savings.
