@@ -27,6 +27,7 @@ python scripts/train_boundary_reranker.py \
   --stage1-run residual_factorized_d32_ce_to_hybrid_rank_rw010 \
   --lock-retention .45 --candidate-retention .65 --final-retention .50 \
   --rerank-dim 16 --loss output_hybrid --ranking-weight 0 \
+  --boundary-init zero_embedding_alpha_one \
   --run-name boundary_l45_c65_r16_output --epochs 50 --patience 8 \
   --lr 5e-5 --batch-size 16 --seed 42 --device cuda
 

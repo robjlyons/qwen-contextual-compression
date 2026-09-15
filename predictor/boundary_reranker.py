@@ -21,17 +21,25 @@ def stage1_boundary(stage1_scores,lock_retention,final_retention,candidate_reten
 
 class BoundarySwapReranker(nn.Module):
     """Learn an alpha-gated correction for Stage-1 boundary scores only."""
-    def __init__(self,input_dim,neuron_count,rerank_dim=16,normalize_stage1_scores=True):
+    INITIALIZATIONS=("zero_alpha","zero_embedding_alpha_one")
+    def __init__(self,input_dim,neuron_count,rerank_dim=16,normalize_stage1_scores=True,boundary_init="zero_embedding_alpha_one"):
         super().__init__()
         if rerank_dim!=16:raise ValueError("Phase 4.5 uses rerank_dim=16 only")
-        self.context=nn.Linear(input_dim,rerank_dim,bias=False);self.neuron_embeddings=nn.Embedding(neuron_count,rerank_dim);self.alpha=nn.Parameter(torch.zeros(()));self.normalize_stage1_scores=normalize_stage1_scores
+        if boundary_init not in self.INITIALIZATIONS:raise ValueError(f"unknown boundary initialization: {boundary_init}")
+        self.context=nn.Linear(input_dim,rerank_dim,bias=False);self.neuron_embeddings=nn.Embedding(neuron_count,rerank_dim);self.normalize_stage1_scores=normalize_stage1_scores;self.boundary_init=boundary_init
+        if boundary_init=="zero_embedding_alpha_one":nn.init.zeros_(self.neuron_embeddings.weight);alpha=1.
+        else:alpha=0.
+        self.alpha=nn.Parameter(torch.tensor(alpha))
 
     def normalized_base(self,scores):
         if not self.normalize_stage1_scores:return scores
         return (scores-scores.mean(-1,keepdim=True))/scores.std(-1,keepdim=True,unbiased=False).clamp_min(1e-6)
 
+    def score_parts(self,x,boundary_ids,boundary_scores):
+        query=torch.nn.functional.silu(self.context(x));delta=torch.einsum("bdr,br->bd",self.neuron_embeddings(boundary_ids),query);base=self.normalized_base(boundary_scores);return base,delta,self.alpha*delta
+
     def forward(self,x,boundary_ids,boundary_scores):
-        query=torch.nn.functional.silu(self.context(x));delta=torch.einsum("bdr,br->bd",self.neuron_embeddings(boundary_ids),query);return self.normalized_base(boundary_scores)+self.alpha*delta
+        base,_,correction=self.score_parts(x,boundary_ids,boundary_scores);return base+correction
 
 
 class BoundarySwapCascade(nn.Module):

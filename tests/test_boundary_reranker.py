@@ -17,6 +17,14 @@ def test_locked_and_candidate_semantics_and_zero_alpha_identity():
 def test_boundary_ste_gradients_do_not_touch_stage1():
  stage1=ResidualFactorizedPredictor(4,20,32);reranker=BoundarySwapReranker(4,20);cascade=BoundarySwapCascade(stage1,reranker,.4,.5,.7);locked,boundary,soft=cascade.final_indices(torch.randn(2,4),ste=True);mask=boundary_mask(locked,boundary,soft,20);mask.sum().backward();assert all(p.grad is None for p in stage1.parameters());assert reranker.alpha.grad is not None
 
+def test_gradfix_initialization_and_gradient_sequence():
+ reranker=BoundarySwapReranker(4,20,boundary_init="zero_embedding_alpha_one");assert torch.equal(reranker.neuron_embeddings.weight,torch.zeros_like(reranker.neuron_embeddings.weight));assert reranker.alpha.item()==1.;x=torch.randn(2,4);ids=torch.stack([torch.randperm(20)[:8] for _ in range(2)]);base=torch.randn(2,8);normalized=reranker.normalized_base(base);scores=reranker(x,ids,base);torch.testing.assert_close(scores,normalized);loss=(scores*torch.arange(8.)).sum();loss.backward();assert reranker.neuron_embeddings.weight.grad.norm()>0;assert reranker.context.weight.grad.norm()==0
+ with torch.no_grad():reranker.neuron_embeddings.weight.normal_(0,.01)
+ reranker.zero_grad();reranker(x,ids,base).square().sum().backward();assert reranker.context.weight.grad.norm()>0 and reranker.alpha.grad is not None
+
+def test_old_zero_alpha_mode_remains_explicitly_supported():
+ old=BoundarySwapReranker(4,20,boundary_init="zero_alpha");assert old.alpha.item()==0.;assert old.boundary_init=="zero_alpha"
+
 def test_boundary_accounting_uses_boundary_band():
  result=boundary_accounting(722944,740480,5120,17408,.45,.65,16,267386880);assert result["boundary_count"]==11316-7834==3482;assert result["stage2_macs"]==5120*16+3482*16==137632;assert result["total_selector_macs"]==860576;assert result["total_mac_fraction"]<.005;assert result["neuron_embedding_parameters"]==17408*16
 
@@ -28,4 +36,4 @@ def test_validation_boundary_choice_prefers_restrictive_eligible():
 
 def test_cpu_boundary_training_and_checkpoint_metadata(tmp_path):
  layer=tmp_path/"layer_000";target=layer/"targets";stage_dir=layer/"stage1";target.mkdir(parents=True);stage_dir.mkdir();g=torch.Generator().manual_seed(4);inputs=torch.randn(12,4,generator=g);raw=torch.rand(12,10,generator=g);gated=torch.randn(12,10,generator=g);torch.save({"inputs":inputs,"scores":raw/raw.sum(-1,keepdim=True),"raw_scores":raw,"gated_activations":gated},target/"targets.pt");torch.save({"weight":torch.randn(3,10,generator=g),"bias":None},target/"down_projection.pt");(target/"sample_metadata.jsonl").write_text("".join(json.dumps({"prompt_ids":i})+"\n" for i in range(12)));(layer/"splits.json").write_text(json.dumps({"train":list(range(8)),"validation":[8,9],"test":[10,11]}));stage=ResidualFactorizedPredictor(4,10,32);torch.save({"model":stage.state_dict(),"mean":inputs[:8].mean(0),"std":inputs[:8].std(0),"config":architecture_metadata(stage,"residual_factorized",4,10,32)},stage_dir/"best.pt")
- train_boundary_reranker(tmp_path,0,"stage1","boundary",.3,.7,.5,device="cpu",epochs=1,batch_size=4);checkpoint=torch.load(layer/"boundary"/"best.pt",map_location="cpu",weights_only=False);assert checkpoint["config"]["lock_retention"]==.3 and checkpoint["config"]["candidate_retention"]==.7 and checkpoint["config"]["final_retention"]==.5
+ result=train_boundary_reranker(tmp_path,0,"stage1","boundary",.3,.7,.5,device="cpu",epochs=1,batch_size=4);checkpoint=torch.load(layer/"boundary"/"best.pt",map_location="cpu",weights_only=False);assert checkpoint["config"]["lock_retention"]==.3 and checkpoint["config"]["candidate_retention"]==.7 and checkpoint["config"]["final_retention"]==.5;assert checkpoint["config"]["boundary_init"]=="zero_embedding_alpha_one";assert result["initial_validation"]["selection_mismatch_count"]==0;assert (layer/"boundary"/"gradient_diagnostics.json").is_file()

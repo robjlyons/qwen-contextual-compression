@@ -25,6 +25,8 @@ def test_static_is_deterministic_and_retention_needs_no_retraining():
  target=torch.tensor([[3.,1.,2.],[3.,0.,1.]]);m=StaticHot().fit(target);x=torch.zeros(1,2);assert torch.equal(m(x),m(x)) and select_topk(m(x),.34).shape[-1]==2 and select_topk(m(x),.67).shape[-1]==3
 def test_reconstruction_and_distribution_loss():
  a=torch.randn(2,5);w=torch.randn(3,5);idx=torch.tensor([[0,2],[1,4]]);metrics=reconstruct_metrics(a,w,idx);manual=torch.nn.functional.linear(torch.zeros_like(a).scatter_(1,idx,a.gather(1,idx)),w);dense=torch.nn.functional.linear(a,w);torch.testing.assert_close(metrics["mse"],(dense-manual).square().mean(-1));assert torch.isfinite(distribution_ce(torch.randn(2,5),a.abs()))
+def test_reconstruction_aligns_fp16_activations_to_fp32_weight():
+ a=torch.randn(2,5).half();w=torch.randn(3,5).float();idx=torch.tensor([[0,2],[1,4]]);metrics=reconstruct_metrics(a,w,idx);assert all(torch.isfinite(value).all() for value in metrics.values())
 def test_train_only_svd_and_fallback_average():
  train=torch.randn(20,10);validation=torch.randn(5,10)+100;codec=TargetSVD(3).fit(train);torch.testing.assert_close(codec.mean,train.mean(0));r=fallback_retention(torch.tensor([0.,1.]),.5,.1,.5);assert float(r.mean())==torch.tensor(.55).item()
 

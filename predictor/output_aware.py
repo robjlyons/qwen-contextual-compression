@@ -25,7 +25,7 @@ def output_loss(sparse,dense,kind="output_hybrid",cosine_weight=1.,relative_weig
 def ensure_dense_output_cache(target_dir,device="cpu",batch_size=16):
  path=target_dir/"dense_ffn_outputs.pt"
  if path.exists():return path
- data=torch.load(target_dir/"targets.pt",map_location="cpu",weights_only=True);down=torch.load(target_dir/"down_projection.pt",map_location="cpu",weights_only=True);weight=down["weight"].to(device);bias=None if down["bias"] is None else down["bias"].to(device);parts=[]
+ data=torch.load(target_dir/"targets.pt",map_location="cpu",weights_only=True);down=torch.load(target_dir/"down_projection.pt",map_location="cpu",weights_only=True);weight=down["weight"].to(device);bias=None if down["bias"] is None else down["bias"].to(device=device,dtype=weight.dtype);parts=[]
  with torch.inference_mode():
-  for batch in data["gated_activations"].split(batch_size):parts.append(F.linear(batch.to(device),weight,bias).cpu().half())
+  for batch in data["gated_activations"].split(batch_size):parts.append(F.linear(batch.to(device=device,dtype=weight.dtype),weight,bias).cpu().half())
  torch.save(torch.cat(parts),path);return path
