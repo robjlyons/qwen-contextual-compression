@@ -30,6 +30,9 @@ def test_transposed_down_matches_original():
 def test_cuda_backend_is_materialization_free_and_skip_is_diagnostic():
  assert "index_select" not in CUDA_SOURCE;assert "torch/extension.h" not in CUDA_SOURCE;assert "<ATen/ATen.h>" in CUDA_SOURCE and "at::Tensor" in CUDA_SOURCE;assert "torch/extension.h" in CPP_SOURCE;assert "getCurrentCUDAStream" in CUDA_SOURCE and "C10_CUDA_KERNEL_LAUNCH_CHECK" in CUDA_SOURCE;diagnostic=cuda_build_diagnostic();assert "available" in diagnostic
 
+def test_cuda_down_shape_check_uses_braced_torch_check_branches():
+ assert 'if(t){TORCH_CHECK' in CUDA_SOURCE;assert '}else{TORCH_CHECK' in CUDA_SOURCE;assert 'if(t)TORCH_CHECK' not in CUDA_SOURCE
+
 def test_id_validation_and_interleaving_are_deterministic():
  validate_selected_ids(torch.tensor([0,2,4]),5,3,True)
  with pytest.raises(ValueError,match="expected"):validate_selected_ids(torch.tensor([0,2]),5,3)
