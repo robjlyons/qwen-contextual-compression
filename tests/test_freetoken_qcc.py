@@ -72,7 +72,7 @@ def test_off_untargeted_and_prefill_never_initialize(tmp_path):
     assert FakeRuntime.constructions == 0
 
 
-def test_replace_restores_dtype_and_initializes_once(tmp_path):
+def test_replace_restores_dtype_initializes_once_and_logs_intercept_once(tmp_path, capsys):
     FakeRuntime.constructions = 0
     bridge = FreeTokenQCCBridge(make_config(tmp_path), FakeRuntime)
     mlp = FakeMLP()
@@ -84,6 +84,7 @@ def test_replace_restores_dtype_and_initializes_once(tmp_path):
     assert mlp.original_calls == 0
     assert bridge.counters["sparse_decode_calls"] == 2
     assert FakeRuntime.constructions == 1
+    assert capsys.readouterr().out.count("QCC REAL DECODE INTERCEPT CONFIRMED") == 1
 
 
 def test_shadow_returns_stock_and_aggregates_metrics(tmp_path):
@@ -96,6 +97,12 @@ def test_shadow_returns_stock_and_aggregates_metrics(tmp_path):
     assert summary["count"] == 1
     assert summary["all_finite"] is True
     assert bridge.counters["shadow_decode_calls"] == 1
+    assert bridge.summary()["integration_status"] == "decode_intercept_confirmed"
+
+
+def test_shadow_with_no_decode_is_reported_as_integration_failure(tmp_path):
+    bridge = FreeTokenQCCBridge(make_config(tmp_path, "shadow"), FakeRuntime)
+    assert bridge.summary()["integration_status"] == "failure_no_shadow_decode_calls"
 
 
 def test_wrong_shape_falls_back(tmp_path):

@@ -194,6 +194,7 @@ class FreeTokenQCCBridge:
         }
         self.closed = False
         self.integration = {"freetoken_version": None, "architecture": None}
+        self._decode_intercept_confirmed = False
 
     @property
     def runtime(self):
@@ -218,6 +219,21 @@ class FreeTokenQCCBridge:
             return self._fallback("prefill_fallbacks", original, instance, x, args, kwargs)
         if x.ndim != 2 or tuple(x.shape) != (1, EXPECTED_HIDDEN):
             return self._fallback("wrong_shape_fallbacks", original, instance, x, args, kwargs)
+        if not self._decode_intercept_confirmed:
+            self._decode_intercept_confirmed = True
+            print(
+                "QCC REAL DECODE INTERCEPT CONFIRMED: "
+                + json.dumps(
+                    {
+                        "layer": layer,
+                        "shape": list(x.shape),
+                        "dtype": str(x.dtype),
+                        "mode": self.config.mode,
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
         if self.config.mode == "shadow":
             stock = original(instance, x, *args, **kwargs)
             sparse, selected_ids = self.runtime.run(x)
@@ -241,6 +257,14 @@ class FreeTokenQCCBridge:
         return sparse
 
     def summary(self) -> dict:
+        if self.config.mode == "shadow" and self.counters["shadow_decode_calls"] == 0:
+            integration_status = "failure_no_shadow_decode_calls"
+        elif self.config.mode == "replace" and self.counters["sparse_decode_calls"] == 0:
+            integration_status = "failure_no_sparse_decode_calls"
+        elif self.config.mode == "off":
+            integration_status = "off"
+        else:
+            integration_status = "decode_intercept_confirmed"
         return {
             "mode": self.config.mode,
             "target_layer": self.config.layer,
@@ -248,6 +272,8 @@ class FreeTokenQCCBridge:
             "shadow": self.metrics.summary(),
             "memory": getattr(self._runtime, "memory", None),
             "integration": dict(self.integration),
+            "decode_intercept_confirmed": self._decode_intercept_confirmed,
+            "integration_status": integration_status,
             "scope_warning": "Single Qwen3.8 layer-0 integration only; no full-model throughput or VRAM claim.",
         }
 

@@ -2,6 +2,8 @@
 
 Phase 5D-A patches the installed FreeToken `Qwen3_5DenseMLP.forward` **in process**. It does not edit or vendor FreeToken. Only Qwen3.8 layer 0, decode shape `[1, 5120]`, is eligible; prefill, other shapes, and all other layers use the stock dense method.
 
+FreeToken uses multiprocessing `spawn`. In shadow/replace modes the parent launcher therefore replaces only FreeToken's scheduler process target with the importable `integration.freetoken_qcc.worker.qcc_scheduler_entry`. The fresh scheduler process installs the dense-MLP patch and owns metrics and lazy CUDA state; tokenizer workers and the parent API process remain unpatched. Parent and worker PID diagnostics plus a one-time `QCC REAL DECODE INTERCEPT CONFIRMED` line prove that the model process reached the bridge. Off mode does not replace any target.
+
 ## Launch modes
 
 Run these commands from the repository using the Python environment in which FreeToken is installed. CUDA graphs are intentionally disabled for this integration experiment.
@@ -35,3 +37,5 @@ python scripts/benchmark_freetoken_api.py --model RadixArk/Qwen3.8-27B-NVFP4 --r
 ```
 
 The reported rate is request-level completion throughput and includes time to first token. A one-layer result must not be presented as model-wide contextual sparsity or as an isolated decode-kernel rate.
+
+For a Windows shadow verification, issue at least one generation request and confirm that the logs contain distinct parent and scheduler PIDs, the one-time real-decode message, and a final scheduler summary with `shadow_decode_calls` greater than zero. A completed request with zero shadow calls is an integration failure.
