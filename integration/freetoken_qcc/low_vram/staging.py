@@ -38,6 +38,7 @@ class LayerStager:
         self.peak_cuda_allocated = 0
         self.peak_cuda_reserved = 0
         self._active = {}
+        self._first_stage_logged = False
 
     def stage(self, layer_id: int, slot: int) -> StagingSlot:
         target = self.slots[slot]
@@ -57,6 +58,12 @@ class LayerStager:
         self.events.append(event)
         self.total_bytes += byte_size
         self.total_seconds += elapsed
+        if not self._first_stage_logged:
+            self._first_stage_logged = True
+            print(
+                f"QCC LOW-VRAM REAL LAYER STAGE CONFIRMED: layer={layer_id} slot={slot} bytes={byte_size} h2d_ms={elapsed * 1000:.3f}",
+                flush=True,
+            )
         return target
 
     def wait(self, slot: int) -> None:
@@ -72,6 +79,10 @@ class LayerStager:
             owner, attribute = _resolve(layer_object, attribute_path)
             restore.append((owner, attribute, getattr(owner, attribute)))
             setattr(owner, attribute, target.tensors[tensor_name])
+        for attribute_path, value in self.host_store.layer(layer_id).runtime_attributes.items():
+            owner, attribute = _resolve(layer_object, attribute_path)
+            restore.append((owner, attribute, getattr(owner, attribute)))
+            setattr(owner, attribute, value)
         self._active[slot] = restore
 
     def deactivate(self, slot: int) -> None:

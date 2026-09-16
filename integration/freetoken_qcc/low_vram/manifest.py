@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 FORMAT = "qcc-freetoken-stream-cache"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 REPRESENTATION = "freetoken-finalized-runtime-layout"
 
 
@@ -33,6 +33,15 @@ def load_manifest(root: Path, expected_model: str | None = None) -> dict:
     layers = manifest.get("layers")
     if not isinstance(layers, list) or len(layers) != manifest.get("layer_count"):
         raise ValueError("Manifest layer table does not match layer_count")
+    for field in ("source_model", "freetoken_version", "adapter_fingerprint", "tensor_count", "tensor_bytes"):
+        if field not in manifest:
+            raise ValueError(f"Manifest missing required field: {field}")
+    for record in [manifest.get("embedding"), manifest.get("resident"), *layers]:
+        if not isinstance(record, dict) or "bindings" not in record:
+            raise ValueError("Every cache payload must contain tensor bindings")
+    for record in layers:
+        if "runtime_attributes" not in record:
+            raise ValueError("Every layer payload must contain runtime_attributes")
     return manifest
 
 

@@ -13,12 +13,17 @@ class FreeTokenIntegrationVersionError(RuntimeError):
 def qcc_scheduler_entry(args, ack_queue):
     """Install QCC in a spawned scheduler process, then run FreeToken's scheduler."""
     from integration.freetoken_qcc.bridge import FreeTokenQCCConfig, install_patch
+    from integration.freetoken_qcc.low_vram.adapter import install_low_vram_adapter
+    from integration.freetoken_qcc.low_vram.config import LowVRAMConfig
 
     config = FreeTokenQCCConfig.from_env()
-    if config.mode == "off":
-        raise RuntimeError("QCC scheduler worker must not be used when QCC_FT_MODE=off")
+    low_vram = LowVRAMConfig.from_env()
+    if config.mode == "off" and not low_vram.enabled:
+        raise RuntimeError("QCC scheduler worker requires sparse QCC or low-VRAM mode")
 
-    bridge = install_patch(config)
+    bridge = install_patch(config) if config.mode != "off" else None
+    expected_model = getattr(args, "model", None) or getattr(args, "model_path", None)
+    low_vram_adapter = install_low_vram_adapter(low_vram, expected_model) if low_vram.enabled else None
     try:
         # Under multiprocessing spawn this is a fresh interpreter, so this
         # import resolves FreeToken's unmodified scheduler. The identity guard
@@ -43,12 +48,15 @@ def qcc_scheduler_entry(args, ack_queue):
         )
         return original_scheduler(args, ack_queue)
     finally:
-        bridge.close()
+        if bridge is not None:
+            bridge.close()
+        if low_vram_adapter is not None:
+            low_vram_adapter.close()
 
 
-def install_scheduler_target(config, launch_module=None) -> bool:
+def install_scheduler_target(config, launch_module=None, force=False) -> bool:
     """Replace only the parent process's scheduler spawn target."""
-    if config.mode == "off":
+    if config.mode == "off" and not force:
         return False
     if launch_module is None:
         launch_module = importlib.import_module("freetoken.server.launch")

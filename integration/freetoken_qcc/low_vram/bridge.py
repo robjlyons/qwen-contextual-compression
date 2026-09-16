@@ -22,8 +22,11 @@ class LowVRAMModelBridge:
         self.host_store = host_store
         self.device = torch.device(device)
         self.stager = LayerStager(host_store, self.device, slots=2, asynchronous=False)
-        self.prefill_executions = 0
-        self.decode_executions = 0
+        self.layer_prefill_executions = 0
+        self.layer_decode_executions = 0
+        self.model_prefill_forwards = 0
+        self.model_decode_forwards = 0
+        self.decode_tokens = 0
         self.requests = 0
         self.finite_outputs = True
         self.started = time.perf_counter()
@@ -49,15 +52,37 @@ class LowVRAMModelBridge:
                     if isinstance(tensor, torch.Tensor):
                         self.finite_outputs = self.finite_outputs and bool(torch.isfinite(tensor).all())
                     if args and isinstance(args[0], torch.Tensor) and args[0].shape[0] == 1:
-                        self.decode_executions += 1
+                        self.layer_decode_executions += 1
                     else:
-                        self.prefill_executions += 1
+                        self.layer_prefill_executions += 1
                     return output
                 finally:
                     self.stager.deactivate(slot)
 
             layer.forward = streamed_forward
             self._patched.append((layer, original))
+
+    def attach_model_forward(self, model) -> None:
+        original = model.forward
+
+        def counted_forward(*args, **kwargs):
+            token_input = args[0] if args else kwargs.get("input_ids")
+            decode = isinstance(token_input, torch.Tensor) and token_input.shape[0] == 1
+            if decode:
+                self.model_decode_forwards += 1
+                self.decode_tokens += 1
+            else:
+                self.model_prefill_forwards += 1
+            before = len(self.stager.events)
+            output = original(*args, **kwargs)
+            staged = len(self.stager.events) - before
+            if staged == 64 == self.host_store.layer_count and not getattr(self, "_full_forward_logged", False):
+                self._full_forward_logged = True
+                print("QCC LOW-VRAM FULL 64-LAYER FORWARD CONFIRMED", flush=True)
+            return output
+
+        model.forward = counted_forward
+        self._patched.append((model, original))
 
     def restore(self) -> None:
         for layer, original in self._patched:
@@ -68,8 +93,11 @@ class LowVRAMModelBridge:
         result = self.stager.summary()
         result.update(
             requests=self.requests,
-            prefill_executions=self.prefill_executions,
-            decode_executions=self.decode_executions,
+            layer_prefill_executions=self.layer_prefill_executions,
+            layer_decode_executions=self.layer_decode_executions,
+            model_prefill_forwards=self.model_prefill_forwards,
+            model_decode_forwards=self.model_decode_forwards,
+            decode_tokens=self.decode_tokens,
             finite_outputs=self.finite_outputs,
             elapsed_seconds=time.perf_counter() - self.started,
         )

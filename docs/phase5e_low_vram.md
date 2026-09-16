@@ -16,4 +16,12 @@ python scripts/inspect_freetoken_install.py `
   --output results\runtime\freetoken_0.1.2_source_audit.json
 ```
 
-Do not launch with `QCC_FT_LOW_VRAM=1` until a version-specific loader adapter has been implemented from that audit. In particular, wrapping decoder-layer forwards after FreeToken's normal full-GPU checkpoint load is not a valid solution: it occurs too late and retains the invalid-storage/OOM failure. The primitives in this phase intentionally do not claim full-model boot or generation success.
+The version-specific adapter now fingerprints the behavior-critical installed sources, intercepts `Engine._load_weight_state_dict`, and installs the finalized stream cache through `Qwen3_5MoEForCausalLM.load_state_dict`. It rejects source mismatches, TP other than one, cache/model mismatches, and any non-empty state mapping reaching the model hook. This bypass is intentionally narrow to FreeToken's Qwen3.5/Qwen3.8 class.
+
+Prepare the cache in the FreeToken environment:
+
+```powershell
+& $FTPython scripts/prepare_freetoken_stream_cache.py --model RadixArk/Qwen3.8-27B-NVFP4 --output results\freetoken_stream_cache\qwen38_27b_nvfp4
+```
+
+Then launch with `QCC_FT_MODE=off`, `QCC_FT_LOW_VRAM=1`, `QCC_FT_STREAM_ASYNC=0`, and `QCC_FT_STREAM_CACHE` pointing to that directory. CUDA graphs must remain disabled. The Linux development environment still cannot claim full-model boot or generation success because it has neither the installed FreeToken build, checkpoint, nor target GPU.

@@ -121,7 +121,23 @@ def test_launcher_sparse_mode_installs_target_before_cli(monkeypatch):
     calls = []
     config = FreeTokenQCCConfig(mode="shadow")
     monkeypatch.setattr(launcher.FreeTokenQCCConfig, "from_env", classmethod(lambda cls: config))
-    monkeypatch.setattr(launcher, "install_scheduler_target", lambda received: calls.append(("patch", received)))
+    monkeypatch.setattr(launcher, "install_scheduler_target", lambda received, force=False: calls.append(("patch", received)))
     monkeypatch.setattr(launcher.importlib, "import_module", lambda name: SimpleNamespace(main=lambda: calls.append(("cli", name))))
     launcher.main()
     assert calls == [("patch", config), ("cli", "freetoken.cli")]
+
+
+def test_worker_installs_low_vram_adapter_when_sparse_mode_is_off(monkeypatch, tmp_path):
+    import integration.freetoken_qcc.bridge as bridge_module
+    import integration.freetoken_qcc.low_vram.adapter as adapter_module
+    import integration.freetoken_qcc.worker as worker_module
+
+    events = []
+    monkeypatch.setenv("QCC_FT_MODE", "off")
+    monkeypatch.setenv("QCC_FT_LOW_VRAM", "1")
+    monkeypatch.setenv("QCC_FT_STREAM_CACHE", str(tmp_path))
+    fake_adapter = SimpleNamespace(close=lambda: events.append("low_close"))
+    monkeypatch.setattr(adapter_module, "install_low_vram_adapter", lambda config, expected_model=None: events.append(("low_install", expected_model)) or fake_adapter)
+    monkeypatch.setattr(worker_module.importlib, "import_module", lambda name: SimpleNamespace(_run_scheduler=lambda args, queue: events.append("scheduler")))
+    qcc_scheduler_entry(SimpleNamespace(model="fake/model"), None)
+    assert events == [("low_install", "fake/model"), "scheduler", "low_close"]

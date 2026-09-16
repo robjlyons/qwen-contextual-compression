@@ -6,6 +6,8 @@ import hashlib
 import json
 from pathlib import Path
 
+import _bootstrap
+
 
 NEEDLES = (
     "_load_maybe_quantized",

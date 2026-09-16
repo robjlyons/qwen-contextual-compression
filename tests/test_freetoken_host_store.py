@@ -17,6 +17,8 @@ def test_host_store_lazy_layers_metadata_and_neuron_access(tmp_path):
     torch.testing.assert_close(layer.neuron_tensor("weight", torch.tensor([2, 0])), layer.tensor("weight")[[2, 0]])
     assert store.host_transformer_bytes == sum(record["tensor_bytes"] for record in manifest["layers"])
     assert store.host_embedding_bytes == manifest["embedding"]["tensor_bytes"]
+    resident = store.resident()
+    assert "norm" in resident.tensors and resident.byte_size == manifest["resident"]["tensor_bytes"]
 
 
 def test_host_store_rejects_model_and_checksum_mismatch(tmp_path):

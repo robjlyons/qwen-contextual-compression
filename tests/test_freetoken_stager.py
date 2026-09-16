@@ -48,6 +48,23 @@ def test_staged_weight_computation_equals_host_reference(tmp_path):
     torch.testing.assert_close(actual, expected)
 
 
+def test_runtime_attributes_are_applied_and_restored(tmp_path):
+    root = tmp_path / "cache"
+    make_cache(root, [{"weight": torch.ones(2, 2)}])
+    import json
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["layers"][0]["runtime_attributes"] = {"linear._transposed": True}
+    manifest_path.write_text(json.dumps(manifest))
+    store = TransformerHostStore(root)
+    layer = SimpleNamespace(weight=torch.empty(0), linear=SimpleNamespace(_transposed=False))
+    stager = LayerStager(store, "cpu")
+    stager.stage(0, 0);stager.activate(0, 0, layer)
+    assert layer.linear._transposed is True
+    stager.deactivate(0)
+    assert layer.linear._transposed is False
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 def test_cuda_staging_preserves_values_dtype_and_bounded_slots(tmp_path):
     root = tmp_path / "cache"

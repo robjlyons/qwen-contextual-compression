@@ -16,6 +16,7 @@ class HostLayer:
     tensors: dict[str, torch.Tensor]
     bindings: dict[str, str]
     byte_size: int
+    runtime_attributes: dict[str, object]
 
     def tensor(self, name: str) -> torch.Tensor:
         return self.tensors[name]
@@ -52,10 +53,15 @@ class TransformerHostStore:
             tensors = load_file(str(self.root / record["file"]), device="cpu")
             if any(tensor.device.type != "cpu" for tensor in tensors.values()):
                 raise RuntimeError("Stream-cache tensors must remain host-backed")
-            self._layers[layer_id] = HostLayer(layer_id, tensors, record["bindings"], record["tensor_bytes"])
+            self._layers[layer_id] = HostLayer(layer_id, tensors, record["bindings"], record["tensor_bytes"], record["runtime_attributes"])
         return self._layers[layer_id]
 
     def embedding_weight(self) -> torch.Tensor:
         record = self.manifest["embedding"]
         tensors = load_file(str(self.root / record["file"]), device="cpu")
         return tensors[record["tensor_name"]]
+
+    def resident(self) -> HostLayer:
+        record = self.manifest["resident"]
+        tensors = load_file(str(self.root / record["file"]), device="cpu")
+        return HostLayer(-1, tensors, record["bindings"], record["tensor_bytes"], record.get("runtime_attributes", {}))

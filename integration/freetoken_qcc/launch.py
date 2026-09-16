@@ -13,14 +13,8 @@ from integration.freetoken_qcc.worker import install_scheduler_target
 def main():
     config = FreeTokenQCCConfig.from_env()
     low_vram = LowVRAMConfig.from_env()
-    if low_vram.enabled:
-        raise RuntimeError(
-            "QCC_FT_LOW_VRAM requested, but no adapter for the installed FreeToken loader has been "
-            "validated. Run scripts/inspect_freetoken_install.py on the target Windows installation; "
-            "refusing to fall back to full CUDA materialization."
-        )
-    if config.mode != "off":
-        install_scheduler_target(config)
+    if config.mode != "off" or low_vram.enabled:
+        install_scheduler_target(config, force=low_vram.enabled)
         print(
             "QCC FreeToken parent scheduler target installed: "
             + json.dumps(
