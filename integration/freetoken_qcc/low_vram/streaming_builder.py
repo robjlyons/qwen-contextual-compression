@@ -83,6 +83,36 @@ def classify_loader_extra(name: str, tensor: torch.Tensor, expected: dict[str, E
     return None
 
 
+def adapt_normalized_tensor(name: str, tensor: torch.Tensor, expected: ExpectedTensor):
+    """Validate loader output and apply only proven runtime dtype repairs."""
+    shape = tuple(tensor.shape)
+    if shape != expected.shape:
+        raise StreamBuildError(
+            f"Normalized tensor shape mismatch for {name}: {shape} != {expected.shape}"
+        )
+    if tensor.dtype == expected.dtype:
+        return tensor, None
+    if (
+        name.endswith((".A_log", ".dt_bias"))
+        and expected.dtype == torch.float32
+        and tensor.dtype in (torch.bfloat16, torch.float16)
+        and tensor.device.type == "cpu"
+        and not tensor.is_meta
+    ):
+        return tensor.to(torch.float32), {
+            "name": name,
+            "shape": list(shape),
+            "source_dtype": str(tensor.dtype),
+            "target_dtype": str(torch.float32),
+            "source_bytes": tensor.numel() * tensor.element_size(),
+            "target_bytes": tensor.numel() * expected.tensor.element_size(),
+            "reason": "gdn-gate-param-runtime-fp32",
+        }
+    raise StreamBuildError(
+        f"Normalized tensor dtype mismatch for {name}: {tensor.dtype} != {expected.dtype}"
+    )
+
+
 def spool_normalized_weights(loaded, expected: dict[str, ExpectedTensor], building: Path, layer_count: int,
                              loader_diagnostics=None) -> dict:
     """Consume the loader exactly once and persist one tensor per spool file."""
@@ -90,6 +120,7 @@ def spool_normalized_weights(loaded, expected: dict[str, ExpectedTensor], buildi
     spool.mkdir(parents=True, exist_ok=False)
     entries, seen, emitted_names = [], set(), set()
     ignored_entries = []
+    adaptation_entries = []
     total_bytes = largest_bytes = 0
     print("QCC STREAM NORMALIZATION", flush=True)
     _memory_diagnostic("normalization-start")
@@ -124,6 +155,16 @@ def spool_normalized_weights(loaded, expected: dict[str, ExpectedTensor], buildi
                 )
             del tensor, item
             continue
+        tensor, adaptation = adapt_normalized_tensor(name, tensor, expected[name])
+        if adaptation is not None:
+            adaptation_entries.append(adaptation)
+            if len(adaptation_entries) == 1:
+                print(
+                    "QCC STREAM TENSOR ADAPTATION:\n"
+                    f"{name}\n{adaptation['source_dtype']} -> {adaptation['target_dtype']}\n"
+                    f"reason={adaptation['reason']}",
+                    flush=True,
+                )
         group, layer_id, relative = classify_key(name, layer_count)
         filename = f"{sequence:06d}.safetensors"
         contiguous = tensor.detach().contiguous()
@@ -161,12 +202,24 @@ def spool_normalized_weights(loaded, expected: dict[str, ExpectedTensor], buildi
         "reason_counts": reason_counts,
         "entries": ignored_entries,
     }
+    adaptation_reason_counts = {}
+    for entry in adaptation_entries:
+        reason = entry["reason"]
+        adaptation_reason_counts[reason] = adaptation_reason_counts.get(reason, 0) + 1
+    adaptations = {
+        "count": len(adaptation_entries),
+        "source_bytes": sum(entry["source_bytes"] for entry in adaptation_entries),
+        "target_bytes": sum(entry["target_bytes"] for entry in adaptation_entries),
+        "reason_counts": adaptation_reason_counts,
+        "entries": adaptation_entries,
+    }
     index = {
         "entries": entries,
         "tensor_count": len(entries),
         "tensor_bytes": total_bytes,
         "largest_tensor_bytes": largest_bytes,
         "ignored_loader_tensors": ignored,
+        "normalized_tensor_adaptations": adaptations,
         "source_loader": loader_diagnostics.to_dict() if loader_diagnostics is not None else None,
     }
     (building / "spool_index.json").write_text(json.dumps(index, indent=2, sort_keys=True), encoding="utf-8")
@@ -180,6 +233,11 @@ def spool_normalized_weights(loaded, expected: dict[str, ExpectedTensor], buildi
     print(
         f"ignored loader tensors: {ignored['count']}; ignored loader bytes: {ignored['tensor_bytes']}; "
         f"reason counts: {json.dumps(reason_counts, sort_keys=True)}",
+        flush=True,
+    )
+    print(
+        f"adapted normalized tensors: {adaptations['count']}; "
+        f"adaptation reason counts: {json.dumps(adaptation_reason_counts, sort_keys=True)}",
         flush=True,
     )
     print("QCC STREAM NORMALIZATION GROUPS: " + json.dumps(category_summary, sort_keys=True), flush=True)
@@ -237,7 +295,7 @@ def _relative_finalized_state(layer, layer_id: int) -> dict[str, torch.Tensor]:
 
 
 def _build_manifest(records, source_model, source_revision, freetoken_version, adapter_fingerprint, nvfp4_count,
-                    ignored_loader_tensors, source_loader):
+                    ignored_loader_tensors, normalized_tensor_adaptations, source_loader):
     embedding_record, resident_record, layer_records = records
     all_records = [embedding_record, resident_record, *layer_records]
     dtype_counts = {}
@@ -259,6 +317,7 @@ def _build_manifest(records, source_model, source_revision, freetoken_version, a
         "tensor_bytes": sum(record["tensor_bytes"] for record in all_records),
         "file_bytes": sum(record["file_bytes"] for record in all_records),
         "ignored_loader_tensors": ignored_loader_tensors,
+        "normalized_tensor_adaptations": normalized_tensor_adaptations,
         "source_loader": source_loader,
         "embedding": embedding_record,
         "resident": resident_record,
@@ -342,7 +401,8 @@ def build_stream_cache_streaming(model, loaded, output: Path, source_model: str,
 
         manifest = _build_manifest((embedding_record, resident_record, layer_records), source_model,
                                    source_revision, freetoken_version, adapter_fingerprint, nvfp4_count,
-                                   index["ignored_loader_tensors"], index["source_loader"])
+                                   index["ignored_loader_tensors"], index["normalized_tensor_adaptations"],
+                                   index["source_loader"])
         contract["source_loader"] = index["source_loader"]
         (building / "freetoken_contract.json").write_text(json.dumps(contract, indent=2, sort_keys=True), encoding="utf-8")
         manifest_temporary = building / "manifest.json.tmp"

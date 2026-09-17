@@ -103,6 +103,69 @@ def test_expected_input_scale_is_spooled_as_runtime_state(tmp_path):
     assert (building / "spool" / index["entries"][0]["file"]).is_file()
 
 
+@pytest.mark.parametrize("suffix", ["A_log", "dt_bias"])
+def test_gdn_gate_parameter_is_adapted_to_runtime_fp32(tmp_path, suffix, capsys):
+    name = f"model.layers.0.linear_attn.{suffix}"
+    expected = {
+        name: ExpectedTensor((3,), torch.float32, torch.empty(3, device="meta", dtype=torch.float32))
+    }
+    building = tmp_path / "cache.building"
+    building.mkdir()
+    index = spool_normalized_weights(
+        iter([(name, torch.ones(3, dtype=torch.bfloat16))]), expected, building, 1
+    )
+    audit = index["normalized_tensor_adaptations"]
+    assert audit["count"] == 1
+    assert audit["source_bytes"] == 6
+    assert audit["target_bytes"] == 12
+    assert audit["reason_counts"] == {"gdn-gate-param-runtime-fp32": 1}
+    assert audit["entries"][0] == {
+        "name": name,
+        "shape": [3],
+        "source_dtype": "torch.bfloat16",
+        "target_dtype": "torch.float32",
+        "source_bytes": 6,
+        "target_bytes": 12,
+        "reason": "gdn-gate-param-runtime-fp32",
+    }
+    spooled = load_file(building / "spool" / index["entries"][0]["file"])["tensor"]
+    assert spooled.dtype == torch.float32
+    assert "QCC STREAM TENSOR ADAPTATION" in capsys.readouterr().out
+
+
+def test_runtime_fp32_a_log_is_not_adapted(tmp_path):
+    name = "model.layers.0.linear_attn.A_log"
+    expected = {
+        name: ExpectedTensor((2,), torch.float32, torch.empty(2, device="meta", dtype=torch.float32))
+    }
+    building = tmp_path / "cache.building"
+    building.mkdir()
+    index = spool_normalized_weights(iter([(name, torch.ones(2, dtype=torch.float32))]), expected, building, 1)
+    assert index["normalized_tensor_adaptations"] == {
+        "count": 0,
+        "source_bytes": 0,
+        "target_bytes": 0,
+        "reason_counts": {},
+        "entries": [],
+    }
+
+
+@pytest.mark.parametrize(
+    "name, tensor, shape, message",
+    [
+        ("model.layers.0.linear_attn.some_other_tensor", torch.ones(2, dtype=torch.bfloat16), (2,), "dtype mismatch"),
+        ("model.layers.0.linear_attn.A_log", torch.ones(3, dtype=torch.bfloat16), (2,), "shape mismatch"),
+        ("model.layers.0.linear_attn.A_log", torch.ones(2, dtype=torch.int32), (2,), "dtype mismatch"),
+    ],
+)
+def test_unproven_runtime_dtype_or_shape_mismatches_fail(tmp_path, name, tensor, shape, message):
+    expected = {name: ExpectedTensor(shape, torch.float32, torch.empty(shape, device="meta"))}
+    building = tmp_path / "cache.building"
+    building.mkdir()
+    with pytest.raises(StreamBuildError, match=message):
+        spool_normalized_weights(iter([(name, tensor)]), expected, building, 1)
+
+
 @pytest.mark.parametrize(
     "name, tensor",
     [
@@ -177,6 +240,7 @@ def test_build_finalizes_layer_captures_attribute_and_restores_meta(tmp_path):
     assert manifest["ignored_loader_tensors"]["reason_counts"] == {
         "runtime-does-not-expose-input-scale": 1
     }
+    assert manifest["normalized_tensor_adaptations"]["count"] == 0
     on_disk_manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
     assert on_disk_manifest["ignored_loader_tensors"] == manifest["ignored_loader_tensors"]
     assert manifest["source_loader"]["owned_shards_opened"] == 1
