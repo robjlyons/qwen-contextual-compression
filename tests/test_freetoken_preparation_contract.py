@@ -71,6 +71,18 @@ def test_prepare_supplies_tp_dtype_uses_bf16_and_dispatches_loader_once(monkeypa
     }
     monkeypatch.setattr(preparation.importlib, "import_module", lambda name: modules[name])
 
+    @contextmanager
+    def fake_windows_safe_loader():
+        yield SimpleNamespace(
+            to_dict=lambda: {
+                "enabled": False,
+                "platform": "test",
+                "loader_mode": "native",
+            }
+        )
+
+    monkeypatch.setattr(preparation, "windows_safe_freetoken_loader", fake_windows_safe_loader)
+
     def write_cache(model, loaded, output, *args, **kwargs):
         observed["loaded"] = next(loaded)[0]
         observed["loader_diagnostics"] = kwargs["loader_diagnostics"].to_dict()
