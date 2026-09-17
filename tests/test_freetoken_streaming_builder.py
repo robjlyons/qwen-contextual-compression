@@ -14,6 +14,7 @@ from integration.freetoken_qcc.low_vram.streaming_builder import (
     classify_key,
     spool_normalized_weights,
 )
+from integration.freetoken_qcc.low_vram.windows_loader import OwnedLoaderDiagnostics
 
 
 def _expected(names):
@@ -157,7 +158,18 @@ def test_build_finalizes_layer_captures_attribute_and_restores_meta(tmp_path):
     model = FakeModel()
     original = model.layer.weight
     output = tmp_path / "cache"
-    manifest = build_stream_cache_streaming(model, _loaded(), output, "fake", "", "test", {}, {})
+    diagnostics = OwnedLoaderDiagnostics(
+        True,
+        "win32",
+        loader_mode="pread",
+        owned_shards_opened=1,
+        owned_shards_released=1,
+        owned_source_bytes=123,
+    )
+    contract = {}
+    manifest = build_stream_cache_streaming(
+        model, _loaded(), output, "fake", "", "test", {}, contract, loader_diagnostics=diagnostics
+    )
     assert model.layer.weight is original
     assert model.layer.weight.is_meta
     assert model.layer._transposed is False
@@ -167,6 +179,10 @@ def test_build_finalizes_layer_captures_attribute_and_restores_meta(tmp_path):
     }
     on_disk_manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
     assert on_disk_manifest["ignored_loader_tensors"] == manifest["ignored_loader_tensors"]
+    assert manifest["source_loader"]["owned_shards_opened"] == 1
+    assert manifest["source_loader"]["owned_shards_released"] == 1
+    spool_contract = json.loads((output / "freetoken_contract.json").read_text(encoding="utf-8"))
+    assert spool_contract["source_loader"] == manifest["source_loader"] == contract["source_loader"]
     assert load_file(output / "layer_000.safetensors")["weight"].device.type == "cpu"
     assert not (output / "spool").exists()
     assert (output / "manifest.json").is_file()

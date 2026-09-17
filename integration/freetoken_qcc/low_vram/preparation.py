@@ -11,6 +11,7 @@ import torch
 
 from integration.freetoken_qcc.low_vram.adapter import inspect_installed_contract, validate_fingerprint
 from integration.freetoken_qcc.low_vram.streaming_builder import build_stream_cache_streaming
+from integration.freetoken_qcc.low_vram.windows_loader import windows_safe_freetoken_loader
 
 
 class PreparationContractError(RuntimeError):
@@ -128,19 +129,21 @@ def prepare_stream_cache(model_path: str, output: Path, revision="", expected_la
         ),
         flush=True,
     )
-    loaded = _call_supported(
-        load_weight,
-        {
-            "model": model_path,
-            "model_path": model_path,
-            "path": model_path,
-            "device": torch.device("cpu"),
-            "include_moe_experts": False,
-            "include_vision": False,
-        },
-    )
     if len(model.model.layers.op_list) != expected_layers:
         raise PreparationContractError(f"Expected {expected_layers} layers, got {len(model.model.layers.op_list)}")
-    return build_stream_cache_streaming(
-        model, loaded, output, model_path, revision, contract["version"], fingerprint, contract
-    )
+    with windows_safe_freetoken_loader() as loader_diagnostics:
+        loaded = _call_supported(
+            load_weight,
+            {
+                "model": model_path,
+                "model_path": model_path,
+                "path": model_path,
+                "device": torch.device("cpu"),
+                "include_moe_experts": False,
+                "include_vision": False,
+            },
+        )
+        return build_stream_cache_streaming(
+            model, loaded, output, model_path, revision, contract["version"], fingerprint, contract,
+            loader_diagnostics=loader_diagnostics,
+        )

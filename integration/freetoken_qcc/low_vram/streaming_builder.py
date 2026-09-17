@@ -83,7 +83,8 @@ def classify_loader_extra(name: str, tensor: torch.Tensor, expected: dict[str, E
     return None
 
 
-def spool_normalized_weights(loaded, expected: dict[str, ExpectedTensor], building: Path, layer_count: int) -> dict:
+def spool_normalized_weights(loaded, expected: dict[str, ExpectedTensor], building: Path, layer_count: int,
+                             loader_diagnostics=None) -> dict:
     """Consume the loader exactly once and persist one tensor per spool file."""
     spool = building / "spool"
     spool.mkdir(parents=True, exist_ok=False)
@@ -148,6 +149,8 @@ def spool_normalized_weights(loaded, expected: dict[str, ExpectedTensor], buildi
     missing = set(expected) - seen
     if missing:
         raise StreamBuildError(f"Missing {len(missing)} expected normalized keys: {sorted(missing)[:8]}")
+    if loader_diagnostics is not None:
+        loader_diagnostics.assert_balanced()
     reason_counts = {}
     for entry in ignored_entries:
         reason = entry["reason"]
@@ -164,6 +167,7 @@ def spool_normalized_weights(loaded, expected: dict[str, ExpectedTensor], buildi
         "tensor_bytes": total_bytes,
         "largest_tensor_bytes": largest_bytes,
         "ignored_loader_tensors": ignored,
+        "source_loader": loader_diagnostics.to_dict() if loader_diagnostics is not None else None,
     }
     (building / "spool_index.json").write_text(json.dumps(index, indent=2, sort_keys=True), encoding="utf-8")
     category_summary = {}
@@ -233,7 +237,7 @@ def _relative_finalized_state(layer, layer_id: int) -> dict[str, torch.Tensor]:
 
 
 def _build_manifest(records, source_model, source_revision, freetoken_version, adapter_fingerprint, nvfp4_count,
-                    ignored_loader_tensors):
+                    ignored_loader_tensors, source_loader):
     embedding_record, resident_record, layer_records = records
     all_records = [embedding_record, resident_record, *layer_records]
     dtype_counts = {}
@@ -255,6 +259,7 @@ def _build_manifest(records, source_model, source_revision, freetoken_version, a
         "tensor_bytes": sum(record["tensor_bytes"] for record in all_records),
         "file_bytes": sum(record["file_bytes"] for record in all_records),
         "ignored_loader_tensors": ignored_loader_tensors,
+        "source_loader": source_loader,
         "embedding": embedding_record,
         "resident": resident_record,
         "layers": layer_records,
@@ -262,7 +267,8 @@ def _build_manifest(records, source_model, source_revision, freetoken_version, a
 
 
 def build_stream_cache_streaming(model, loaded, output: Path, source_model: str, source_revision: str,
-                                 freetoken_version: str, adapter_fingerprint: dict, contract: dict) -> dict:
+                                 freetoken_version: str, adapter_fingerprint: dict, contract: dict,
+                                 loader_diagnostics=None) -> dict:
     """Build the final cache while retaining at most one logical group of tensors."""
     output = Path(output)
     building = output.with_name(output.name + ".building")
@@ -272,7 +278,9 @@ def build_stream_cache_streaming(model, loaded, output: Path, source_model: str,
     try:
         layers = model.model.layers.op_list
         expected = expected_tensors(model)
-        index = spool_normalized_weights(loaded, expected, building, len(layers))
+        index = spool_normalized_weights(
+            loaded, expected, building, len(layers), loader_diagnostics=loader_diagnostics
+        )
         entries = index["entries"]
 
         embedding_entries = [entry for entry in entries if entry["group"] == "embedding"]
@@ -334,7 +342,8 @@ def build_stream_cache_streaming(model, loaded, output: Path, source_model: str,
 
         manifest = _build_manifest((embedding_record, resident_record, layer_records), source_model,
                                    source_revision, freetoken_version, adapter_fingerprint, nvfp4_count,
-                                   index["ignored_loader_tensors"])
+                                   index["ignored_loader_tensors"], index["source_loader"])
+        contract["source_loader"] = index["source_loader"]
         (building / "freetoken_contract.json").write_text(json.dumps(contract, indent=2, sort_keys=True), encoding="utf-8")
         manifest_temporary = building / "manifest.json.tmp"
         manifest_temporary.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")

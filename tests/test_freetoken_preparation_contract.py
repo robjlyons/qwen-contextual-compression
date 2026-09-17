@@ -71,8 +71,9 @@ def test_prepare_supplies_tp_dtype_uses_bf16_and_dispatches_loader_once(monkeypa
     }
     monkeypatch.setattr(preparation.importlib, "import_module", lambda name: modules[name])
 
-    def write_cache(model, loaded, output, *args):
+    def write_cache(model, loaded, output, *args, **kwargs):
         observed["loaded"] = next(loaded)[0]
+        observed["loader_diagnostics"] = kwargs["loader_diagnostics"].to_dict()
         return {"ok": True}
 
     monkeypatch.setattr(preparation, "build_stream_cache_streaming", write_cache)
@@ -87,6 +88,7 @@ def test_prepare_supplies_tp_dtype_uses_bf16_and_dispatches_loader_once(monkeypa
     assert torch.get_default_dtype() == previous_dtype
     assert observed["loader"] == ("fake/model", "cpu", False, False)
     assert observed["loaded"] == "normalized.weight"
+    assert observed["loader_diagnostics"]["enabled"] is False
     assert calls == {"load_weight": 1, "iter_weights": 0}
     assert "QCC STREAM CACHE FREETOKEN CONTRACT" in capsys.readouterr().out
 
