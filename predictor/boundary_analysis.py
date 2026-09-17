@@ -1,0 +1,27 @@
+"""Validation boundary-oracle ceilings and configuration selection."""
+from __future__ import annotations
+import json
+from pathlib import Path
+import torch
+from predictor.boundary_reranker import boundary_counts,retention_count,stage1_boundary
+from predictor.candidate_analysis import analyze_candidate_retention,load_stage1,reconstruction_summary
+from predictor.metrics import reconstruct_metrics
+
+
+def _set_stats(values):
+    values=values.float();return {"mean":float(values.mean()),"median":float(values.median()),"p95":float(values.quantile(.95)),"maximum":float(values.max())}
+
+
+def analyze_boundary_configuration(stage1_scores,oracle_scores,activations,down_weight,lock_retention,candidate_retention,final_retention=.5,bias=None):
+    locked_k,final_k,candidate_k=boundary_counts(stage1_scores.shape[-1],lock_retention,final_retention,candidate_retention);locked,boundary,_,needed=stage1_boundary(stage1_scores,lock_retention,final_retention,candidate_retention);boundary_oracle=oracle_scores.gather(-1,boundary);chosen=boundary.gather(-1,torch.topk(boundary_oracle,needed,-1,sorted=False).indices);final=torch.cat((locked,chosen),-1);stage1_final=torch.topk(stage1_scores,final_k,-1,sorted=False).indices;metrics=reconstruct_metrics(activations,down_weight,final,bias);stage1_metrics=reconstruct_metrics(activations,down_weight,stage1_final,bias);final_bool=torch.zeros_like(oracle_scores,dtype=torch.bool).scatter_(-1,final,True);stage1_bool=torch.zeros_like(final_bool).scatter_(-1,stage1_final,True);added=(final_bool&~stage1_bool).sum(-1);oracle_final=torch.topk(oracle_scores,final_k,-1,sorted=False).indices;intersection=final_bool.gather(-1,oracle_final).sum(-1).float();mass=oracle_scores.gather(-1,final).sum(-1)/oracle_scores.sum(-1).clamp_min(1e-12);summary=reconstruction_summary(metrics);stage1_summary=reconstruction_summary(stage1_metrics);summary.update(captured_mass=float(mass.mean()),oracle_top50_recall=float((intersection/final_k).mean()));summary.update({"delta_cosine_vs_stage1":summary["ffn_cosine"]-stage1_summary["ffn_cosine"],"delta_relative_l2_vs_stage1":summary["relative_l2"]-stage1_summary["relative_l2"]});return {"lock_retention":lock_retention,"candidate_retention":candidate_retention,"final_retention":final_retention,"boundary_width":candidate_retention-lock_retention,"locked_count":locked_k,"boundary_count":candidate_k-locked_k,"selected_from_boundary":needed,"boundary_restricted_oracle":summary,"stage1":stage1_summary,"swaps":{**_set_stats(added),"mean_changed_neurons":float((2*added).float().mean()),"mean_final_mask_changed_fraction":float((2*added).float().mean()/final_k)}}
+
+
+def recommend_boundary(rows,tolerance=.001):
+    best=max(row["boundary_restricted_oracle"]["ffn_cosine"] for row in rows);eligible=[row for row in rows if best-row["boundary_restricted_oracle"]["ffn_cosine"]<=tolerance];return sorted(eligible,key=lambda row:(-row["lock_retention"],row["candidate_retention"]))[0]
+
+
+def run_boundary_analysis(results_dir:Path,layer:int,stage1_run:str,lock_fractions,candidate_fractions,final_retention=.5,split_name="validation",device="cpu"):
+    layer_dir=Path(results_dir)/f"layer_{layer:03d}";target_dir=layer_dir/"targets";model,checkpoint,data,stage1_hash=load_stage1(target_dir,layer_dir/stage1_run,device);splits=json.loads((layer_dir/"splits.json").read_text());ids=torch.tensor(splits[split_name]);mean=checkpoint["mean"].float();std=checkpoint["std"].float().clamp_min(1e-6);x=((data["inputs"].index_select(0,ids).float()-mean)/std).to(device);oracle=data["raw_scores"].index_select(0,ids).float().to(device);activations=data["gated_activations"].index_select(0,ids).to(device);down=torch.load(target_dir/"down_projection.pt",map_location="cpu",weights_only=True);weight=down["weight"].to(device);bias=None if down["bias"] is None else down["bias"].to(device)
+    with torch.inference_mode():scores=model(x);rows=[analyze_boundary_configuration(scores,oracle,activations,weight,lock,candidate,final_retention,bias) for lock in lock_fractions for candidate in candidate_fractions];full65=analyze_candidate_retention(scores,oracle,activations,weight,.65,final_retention,bias)["restricted_candidate_oracle"];global_ids=torch.topk(oracle,retention_count(oracle.shape[-1],final_retention),-1,sorted=False).indices;global_oracle=reconstruction_summary(reconstruct_metrics(activations,weight,global_ids,bias))
+    for row in rows:row["delta_cosine_vs_full65"]=row["boundary_restricted_oracle"]["ffn_cosine"]-full65["ffn_cosine"];row["delta_relative_l2_vs_full65"]=row["boundary_restricted_oracle"]["relative_l2"]-full65["relative_l2"]
+    chosen=recommend_boundary(rows);output={"selection_split":split_name,"selection_rule":"largest lock then smallest candidate within 0.001 cosine of best validation boundary ceiling","stage1_checkpoint_sha256":stage1_hash,"selected_lock_retention":chosen["lock_retention"],"selected_candidate_retention":chosen["candidate_retention"],"full65_restricted_oracle":full65,"global_oracle":global_oracle,"gap_decomposition":{"candidate_omission_cosine":global_oracle["ffn_cosine"]-full65["ffn_cosine"],"locking_core_cosine":full65["ffn_cosine"]-chosen["boundary_restricted_oracle"]["ffn_cosine"],"candidate_omission_relative_l2":full65["relative_l2"]-global_oracle["relative_l2"],"locking_core_relative_l2":chosen["boundary_restricted_oracle"]["relative_l2"]-full65["relative_l2"]},"rows":rows};out=layer_dir/"boundary_analysis";out.mkdir(exist_ok=True);(out/"analysis.json").write_text(json.dumps(output,indent=2)+"\n");return output
