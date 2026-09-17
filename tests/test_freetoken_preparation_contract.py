@@ -32,7 +32,11 @@ def test_prepare_supplies_tp_dtype_uses_bf16_and_dispatches_loader_once(monkeypa
     def set_tp_info(rank, size):
         observed["set_tp"] = (rank, size)
 
+    def set_rope_device(device):
+        observed["rope_device"] = device.type
+
     def create_model(model_config):
+        assert observed.get("rope_device") == "cpu"
         observed["placeholder_dtype"] = torch.empty(1).dtype
         observed["placeholder_device"] = torch.empty(1).device.type
         return FakeModel()
@@ -57,6 +61,7 @@ def test_prepare_supplies_tp_dtype_uses_bf16_and_dispatches_loader_once(monkeypa
 
     attributes = {
         "set_tp_info": set_tp_info,
+        "set_rope_device": set_rope_device,
         "EngineConfig": EngineConfig,
         "create_model": create_model,
         "load_weight": load_weight,
@@ -81,6 +86,7 @@ def test_prepare_supplies_tp_dtype_uses_bf16_and_dispatches_loader_once(monkeypa
     assert result == {"ok": True}
     assert observed["config"] == ("fake/model", 0, 1, torch.bfloat16)
     assert observed["set_tp"] == (0, 1)
+    assert observed["rope_device"] == "cpu"
     assert observed["placeholder_dtype"] == torch.bfloat16
     assert observed["placeholder_device"] == "meta"
     assert torch.get_default_dtype() == previous_dtype

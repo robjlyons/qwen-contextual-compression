@@ -104,6 +104,18 @@ def prepare_stream_cache(model_path: str, output: Path, revision="", expected_la
             "dtype": torch.bfloat16,
         },
     )
+    set_rope_device = _find_attribute([
+        ("freetoken.layers", "set_rope_device"),
+        ("freetoken.layers.rotary", "set_rope_device"),
+    ])
+    contract["signatures"]["set_rope_device"] = str(inspect.signature(set_rope_device))
+    _call_supported(
+        set_rope_device,
+        {
+            "device": torch.device("cpu"),
+            "rope_device": torch.device("cpu"),
+        },
+    )
     model_config = getattr(config, "model_config", config)
     create_model = _find_attribute([
         ("freetoken.models", "create_model"),
@@ -121,9 +133,11 @@ def prepare_stream_cache(model_path: str, output: Path, revision="", expected_la
                 "engine_config_signature": str(inspect.signature(config_class)),
                 "load_weight_signature": str(inspect.signature(load_weight)),
                 "qwen_iter_weights_signature": contract["signatures"].get("qwen_weight.iter_weights"),
+                "set_rope_device_signature": contract["signatures"]["set_rope_device"],
                 "model_dtype": str(config.dtype),
                 "tp_size": 1,
                 "target_device": "cpu",
+                "rope_device": "cpu",
             },
             sort_keys=True,
         ),
