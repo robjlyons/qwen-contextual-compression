@@ -42,6 +42,78 @@ def test_qcc_model_routes_through_qcc_launch(tmp_path, capsys):
     assert "routing model through integration.freetoken_qcc.launch" in capsys.readouterr().out
 
 
+LOCAL_MODEL = (
+    r"C:\Users\Rob\.cache\huggingface\hub\models--RadixArk--Qwen3.8-27B-NVFP4"
+    r"\snapshots\319f741cce68d7914884900c138a1fbb70a42f30"
+)
+
+
+def _route_command(module, model, tmp_path):
+    return module.build_serve_command(
+        model, 1919, ["--gpu", "0"], python="python.exe", log_dir=str(tmp_path)
+    )[0]
+
+
+def test_exact_configured_local_path_routes_and_is_preserved(tmp_path, capsys):
+    module = SimpleNamespace(build_serve_command=_original_builder)
+    daemon.install_qcc_serve_command_hook(
+        "RadixArk/Qwen3.8-27B-NVFP4",
+        module,
+        platform="win32",
+        environ={"QCC_FT_DAEMON_MODEL_PATH": LOCAL_MODEL},
+    )
+    command = _route_command(module, LOCAL_MODEL, tmp_path)
+    assert command[2:4] == ["integration.freetoken_qcc.launch", "serve"]
+    assert command[command.index("--model") + 1] == LOCAL_MODEL
+    assert "routing configured local model" in capsys.readouterr().out
+
+
+def test_windows_case_and_separator_equivalent_local_path_routes(tmp_path):
+    module = SimpleNamespace(build_serve_command=_original_builder)
+    daemon.install_qcc_serve_command_hook(
+        "RadixArk/Qwen3.8-27B-NVFP4",
+        module,
+        configured_local_path=LOCAL_MODEL,
+        platform="win32",
+    )
+    equivalent = LOCAL_MODEL.upper().replace("\\", "/")
+    command = _route_command(module, equivalent, tmp_path)
+    assert command[2:4] == ["integration.freetoken_qcc.launch", "serve"]
+    assert command[command.index("--model") + 1] == equivalent
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        r"C:\models\unrelated-model",
+        r"C:\other\319f741cce68d7914884900c138a1fbb70a42f30",
+        "319f741cce68d7914884900c138a1fbb70a42f30",
+    ],
+)
+def test_unrelated_or_basename_only_local_path_delegates(tmp_path, candidate):
+    module = SimpleNamespace(build_serve_command=_original_builder)
+    daemon.install_qcc_serve_command_hook(
+        "RadixArk/Qwen3.8-27B-NVFP4",
+        module,
+        configured_local_path=LOCAL_MODEL,
+        platform="win32",
+    )
+    command = _route_command(module, candidate, tmp_path)
+    assert command[2:4] == ["freetoken.cli", "serve"]
+
+
+def test_unset_local_path_preserves_hub_id_only_behavior(tmp_path):
+    module = SimpleNamespace(build_serve_command=_original_builder)
+    daemon.install_qcc_serve_command_hook(
+        "RadixArk/Qwen3.8-27B-NVFP4", module, platform="win32", environ={}
+    )
+    assert _route_command(module, LOCAL_MODEL, tmp_path)[2:4] == ["freetoken.cli", "serve"]
+    assert _route_command(module, "RadixArk/Qwen3.8-27B-NVFP4", tmp_path)[2:4] == [
+        "integration.freetoken_qcc.launch",
+        "serve",
+    ]
+
+
 def test_non_qcc_model_delegates_unchanged(tmp_path):
     calls = []
 

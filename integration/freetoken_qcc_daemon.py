@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import inspect
+import ntpath
 import os
 import signal
 import subprocess
@@ -13,6 +14,7 @@ from pathlib import Path
 
 QCC_LAUNCH_MODULE = "integration.freetoken_qcc.launch"
 QCC_MODEL_ENV = "QCC_FT_DAEMON_MODEL"
+QCC_MODEL_PATH_ENV = "QCC_FT_DAEMON_MODEL_PATH"
 
 
 class QCCDaemonCompatibilityError(RuntimeError):
@@ -68,9 +70,35 @@ def configure_windows_triton_compiler(*, platform=None, environ=None, find_spec=
     return str(compiler)
 
 
-def install_qcc_serve_command_hook(expected_model=None, serve_manager_module=None):
+def _normalized_model_path(path: str, platform: str) -> str:
+    path_module = ntpath if platform == "win32" else os.path
+    return path_module.normcase(path_module.abspath(path))
+
+
+def is_qcc_model(model: str, expected_model: str, configured_local_path=None, *, platform=None) -> bool:
+    """Match only the configured Hub ID or exact configured local model path."""
+    if model == expected_model:
+        return True
+    if not configured_local_path:
+        return False
+    platform = sys.platform if platform is None else platform
+    return _normalized_model_path(model, platform) == _normalized_model_path(configured_local_path, platform)
+
+
+def install_qcc_serve_command_hook(
+    expected_model=None,
+    serve_manager_module=None,
+    configured_local_path=None,
+    *,
+    platform=None,
+    environ=None,
+):
     """Patch only the daemon command builder, delegating all other models."""
+    environ = os.environ if environ is None else environ
     expected_model = expected_model or required_daemon_model()
+    if configured_local_path is None:
+        configured_local_path = environ.get(QCC_MODEL_PATH_ENV, "").strip() or None
+    platform = sys.platform if platform is None else platform
     module = serve_manager_module or importlib.import_module("freetoken.daemon.serve_manager")
     original = getattr(module, "build_serve_command", None)
     if not callable(original):
@@ -89,7 +117,7 @@ def install_qcc_serve_command_hook(expected_model=None, serve_manager_module=Non
         bound.apply_defaults()
         values = bound.arguments
         model = values["model"]
-        if model != expected_model:
+        if not is_qcc_model(model, expected_model, configured_local_path, platform=platform):
             return original(*call_args, **call_kwargs)
         python = values["python"]
         port = values["port"]
@@ -97,7 +125,11 @@ def install_qcc_serve_command_hook(expected_model=None, serve_manager_module=Non
         log_dir = values["log_dir"]
         print(
             "QCC FREETOKEN DAEMON:\n"
-            "routing model through integration.freetoken_qcc.launch",
+            + (
+                "routing model through integration.freetoken_qcc.launch"
+                if model == expected_model
+                else "routing configured local model through integration.freetoken_qcc.launch"
+            ),
             flush=True,
         )
         argv = [
