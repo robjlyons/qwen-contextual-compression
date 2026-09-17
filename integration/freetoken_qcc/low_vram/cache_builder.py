@@ -20,23 +20,28 @@ def collect_runtime_attributes(model) -> dict[int, dict[str, object]]:
     result: dict[int, dict[str, object]] = {}
     layers = model.model.layers.op_list
     for layer_id, layer in enumerate(layers):
-        attributes = {}
-        stack = [("", layer)]
-        visited = set()
-        while stack:
-            prefix, value = stack.pop()
-            if id(value) in visited:
-                continue
-            visited.add(id(value))
-            if hasattr(value, "_transposed"):
-                attributes[prefix + "_transposed"] = bool(value._transposed)
-            for name, child in vars(value).items():
-                if name.startswith("_") or isinstance(child, torch.Tensor):
-                    continue
-                if hasattr(child, "__dict__"):
-                    stack.append((prefix + name + ".", child))
-        result[layer_id] = attributes
+        result[layer_id] = collect_object_runtime_attributes(layer)
     return result
+
+
+def collect_object_runtime_attributes(root) -> dict[str, object]:
+    """Collect runtime flags relative to an arbitrary layer-like object."""
+    attributes = {}
+    stack = [("", root)]
+    visited = set()
+    while stack:
+        prefix, value = stack.pop()
+        if id(value) in visited:
+            continue
+        visited.add(id(value))
+        if hasattr(value, "_transposed"):
+            attributes[prefix + "_transposed"] = bool(value._transposed)
+        for name, child in vars(value).items():
+            if name.startswith("_") or isinstance(child, torch.Tensor):
+                continue
+            if hasattr(child, "__dict__"):
+                stack.append((prefix + name + ".", child))
+    return attributes
 
 
 def validate_finalized_nvfp4(model) -> int:

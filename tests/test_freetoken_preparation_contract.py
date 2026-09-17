@@ -24,11 +24,6 @@ def test_prepare_supplies_tp_dtype_uses_bf16_and_dispatches_loader_once(monkeypa
         def __init__(self):
             self.model = SimpleNamespace(layers=SimpleNamespace(op_list=[object()]))
 
-        def load_state_dict(self, state):
-            observed["state"] = dict(state)
-            state.clear()
-            return None
-
     def set_tp_info(rank, size):
         observed["set_tp"] = (rank, size)
 
@@ -76,11 +71,11 @@ def test_prepare_supplies_tp_dtype_uses_bf16_and_dispatches_loader_once(monkeypa
     }
     monkeypatch.setattr(preparation.importlib, "import_module", lambda name: modules[name])
 
-    def write_cache(model, output, *args):
-        output.mkdir()
+    def write_cache(model, loaded, output, *args):
+        observed["loaded"] = next(loaded)[0]
         return {"ok": True}
 
-    monkeypatch.setattr(preparation, "write_stream_cache", write_cache)
+    monkeypatch.setattr(preparation, "build_stream_cache_streaming", write_cache)
     previous_dtype = torch.get_default_dtype()
     result = preparation.prepare_stream_cache("fake/model", tmp_path / "cache", expected_layers=1)
     assert result == {"ok": True}
@@ -91,6 +86,7 @@ def test_prepare_supplies_tp_dtype_uses_bf16_and_dispatches_loader_once(monkeypa
     assert observed["placeholder_device"] == "meta"
     assert torch.get_default_dtype() == previous_dtype
     assert observed["loader"] == ("fake/model", "cpu", False, False)
+    assert observed["loaded"] == "normalized.weight"
     assert calls == {"load_weight": 1, "iter_weights": 0}
     assert "QCC STREAM CACHE FREETOKEN CONTRACT" in capsys.readouterr().out
 
