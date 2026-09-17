@@ -224,7 +224,7 @@ def test_build_finalizes_layer_captures_attribute_and_restores_meta(tmp_path):
     diagnostics = OwnedLoaderDiagnostics(
         True,
         "win32",
-        loader_mode="pread",
+        loader_mode="lazy-safe-open-clone",
         owned_shards_opened=1,
         owned_shards_released=1,
         owned_source_bytes=123,

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import importlib
-import inspect
 import json
 import sys
 from contextlib import contextmanager
@@ -14,17 +13,26 @@ class WindowsLoaderCompatibilityError(RuntimeError):
     pass
 
 
-class OwnedShard:
-    """The small ``safe_open`` reader surface used by FreeToken."""
+class LazyOwnedShard:
+    """A ``safe_open`` reader that clones only tensors requested by FreeToken."""
 
-    def __init__(self, tensors):
-        self._tensors = tensors
+    def __init__(self, reader, diagnostics):
+        self._reader = reader
+        self._diagnostics = diagnostics
 
     def keys(self):
-        return self._tensors.keys()
+        return self._reader.keys()
 
     def get_tensor(self, name):
-        return self._tensors[name]
+        source = self._reader.get_tensor(name)
+        owned = source.clone()
+        byte_size = owned.numel() * owned.element_size()
+        self._diagnostics.owned_tensors_copied += 1
+        self._diagnostics.owned_tensor_bytes += byte_size
+        self._diagnostics.largest_owned_tensor_bytes = max(
+            self._diagnostics.largest_owned_tensor_bytes, byte_size
+        )
+        return owned
 
 
 @dataclass
@@ -38,6 +46,9 @@ class OwnedLoaderDiagnostics:
     owned_shards_opened: int = 0
     owned_shards_released: int = 0
     owned_source_bytes: int = 0
+    owned_tensors_copied: int = 0
+    owned_tensor_bytes: int = 0
+    largest_owned_tensor_bytes: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -50,6 +61,9 @@ class OwnedLoaderDiagnostics:
             "owned_shards_opened": self.owned_shards_opened,
             "owned_shards_released": self.owned_shards_released,
             "owned_source_bytes": self.owned_source_bytes,
+            "owned_tensors_copied": self.owned_tensors_copied,
+            "owned_tensor_bytes": self.owned_tensor_bytes,
+            "largest_owned_tensor_bytes": self.largest_owned_tensor_bytes,
         }
 
     def assert_balanced(self) -> None:
@@ -81,7 +95,7 @@ def _source_size(path) -> int:
         return 0
 
 
-def make_owned_safe_open(original_safe_open, load_file, mode: str, diagnostics: OwnedLoaderDiagnostics):
+def make_owned_safe_open(original_safe_open, diagnostics: OwnedLoaderDiagnostics):
     """Return a context-manager function compatible with ``safetensors.safe_open``."""
     shard_index = 0
 
@@ -100,21 +114,13 @@ def make_owned_safe_open(original_safe_open, load_file, mode: str, diagnostics: 
         diagnostics.owned_source_bytes += source_bytes
         print(
             "QCC OWNED SHARD OPEN: "
-            f"index={index} size_gib={source_bytes / 2**30:.3f} mode={mode}",
+            f"index={index} size_gib={source_bytes / 2**30:.3f} mode={diagnostics.loader_mode}",
             flush=True,
         )
-        tensors = None
         try:
-            if mode == "pread":
-                tensors = load_file(path, device="cpu", backend="pread")
-            elif mode == "safe-open-copy":
-                with original_safe_open(path, framework="pt", device="cpu", **kwargs) as reader:
-                    tensors = {name: reader.get_tensor(name).clone() for name in reader.keys()}
-            else:
-                raise WindowsLoaderCompatibilityError(f"Unsupported owned shard loader mode: {mode}")
-            yield OwnedShard(tensors)
+            with original_safe_open(path, framework="pt", device="cpu", **kwargs) as reader:
+                yield LazyOwnedShard(reader, diagnostics)
         finally:
-            tensors = None
             diagnostics.owned_shards_released += 1
             print(f"QCC OWNED SHARD RELEASE: index={index}", flush=True)
 
@@ -131,24 +137,12 @@ def windows_safe_freetoken_loader(platform: str | None = None):
         return
 
     safetensors = importlib.import_module("safetensors")
-    safetensors_torch = importlib.import_module("safetensors.torch")
     qwen_weight = importlib.import_module("freetoken.models.qwen3_5_moe.weight")
-    load_file = getattr(safetensors_torch, "load_file", None)
-    if not callable(load_file):
-        raise WindowsLoaderCompatibilityError("safetensors.torch.load_file is unavailable")
-    try:
-        signature = inspect.signature(load_file)
-    except (TypeError, ValueError) as error:
-        raise WindowsLoaderCompatibilityError("Cannot inspect safetensors.torch.load_file") from error
-    backend_support = "backend" in signature.parameters
-    mode = "pread" if backend_support else "safe-open-copy"
     diagnostics = OwnedLoaderDiagnostics(
         enabled=True,
         platform=selected_platform,
         safetensors_version=getattr(safetensors, "__version__", None),
-        load_file_signature=str(signature),
-        backend_support=backend_support,
-        loader_mode=mode,
+        loader_mode="lazy-safe-open-clone",
     )
     print("QCC WINDOWS-SAFE FREETOKEN LOADER: " + json.dumps(diagnostics.to_dict(), sort_keys=True), flush=True)
 
@@ -160,12 +154,12 @@ def windows_safe_freetoken_loader(platform: str | None = None):
         original_safe_open = module_reference.safe_open
         replacement = _SafeTensorsProxy(
             module_reference,
-            make_owned_safe_open(original_safe_open, load_file, mode, diagnostics),
+            make_owned_safe_open(original_safe_open, diagnostics),
         )
     elif callable(direct_reference):
         attribute = "safe_open"
         original = direct_reference
-        replacement = make_owned_safe_open(direct_reference, load_file, mode, diagnostics)
+        replacement = make_owned_safe_open(direct_reference, diagnostics)
     else:
         raise WindowsLoaderCompatibilityError(
             "Installed FreeToken Qwen loader exposes neither safetensors.safe_open nor a local safe_open reference"
