@@ -60,6 +60,63 @@ def test_spool_rejects_invalid_key_sets(tmp_path, items, message):
         spool_normalized_weights(iter(items), expected, building, 1)
 
 
+def test_loader_only_scalar_input_scale_is_audited_not_spooled(tmp_path, capsys):
+    runtime_name = "model.norm.weight"
+    metadata_name = "model.layers.0.foo.input_scale"
+    building = tmp_path / "cache.building"
+    building.mkdir()
+    index = spool_normalized_weights(
+        iter([
+            (metadata_name, torch.tensor(0.125, dtype=torch.float32)),
+            (runtime_name, torch.ones(1, dtype=torch.bfloat16)),
+        ]),
+        _expected([runtime_name]),
+        building,
+        1,
+    )
+    ignored = index["ignored_loader_tensors"]
+    assert ignored == {
+        "count": 1,
+        "tensor_bytes": 4,
+        "reason_counts": {"runtime-does-not-expose-input-scale": 1},
+        "entries": [{
+            "name": metadata_name,
+            "shape": [],
+            "dtype": "torch.float32",
+            "tensor_bytes": 4,
+            "reason": "runtime-does-not-expose-input-scale",
+        }],
+    }
+    assert len(list((building / "spool").glob("*.safetensors"))) == 1
+    assert metadata_name in capsys.readouterr().out
+
+
+def test_expected_input_scale_is_spooled_as_runtime_state(tmp_path):
+    name = "model.layers.0.foo.input_scale"
+    expected = {name: ExpectedTensor((), torch.float32, torch.empty((), device="meta"))}
+    building = tmp_path / "cache.building"
+    building.mkdir()
+    index = spool_normalized_weights(iter([(name, torch.tensor(0.125))]), expected, building, 1)
+    assert index["ignored_loader_tensors"]["count"] == 0
+    assert index["entries"][0]["name"] == name
+    assert (building / "spool" / index["entries"][0]["file"]).is_file()
+
+
+@pytest.mark.parametrize(
+    "name, tensor",
+    [
+        ("model.layers.0.foo.input_scale", torch.ones(2, dtype=torch.float32)),
+        ("model.layers.0.foo.input_scale", torch.tensor(1, dtype=torch.float16)),
+        ("model.layers.0.foo.mystery_scale", torch.tensor(1, dtype=torch.float32)),
+    ],
+)
+def test_unproven_loader_extras_remain_errors(tmp_path, name, tensor):
+    building = tmp_path / "cache.building"
+    building.mkdir()
+    with pytest.raises(StreamBuildError, match="Unexpected normalized state key"):
+        spool_normalized_weights(iter([(name, tensor)]), {}, building, 1)
+
+
 class FakeFinalizingLayer:
     def __init__(self):
         self.weight = torch.empty(1, device="meta", dtype=torch.bfloat16)
@@ -91,6 +148,7 @@ class FakeModel:
 
 
 def _loaded():
+    yield "model.layers.0.projection.input_scale", torch.tensor(0.25, dtype=torch.float32)
     for name in ("model.embed_tokens.weight", "model.layers.0.weight", "model.norm.weight", "lm_head.weight"):
         yield name, torch.ones(1, dtype=torch.bfloat16)
 
@@ -104,6 +162,11 @@ def test_build_finalizes_layer_captures_attribute_and_restores_meta(tmp_path):
     assert model.layer.weight.is_meta
     assert model.layer._transposed is False
     assert manifest["layers"][0]["runtime_attributes"] == {"_transposed": True}
+    assert manifest["ignored_loader_tensors"]["reason_counts"] == {
+        "runtime-does-not-expose-input-scale": 1
+    }
+    on_disk_manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    assert on_disk_manifest["ignored_loader_tensors"] == manifest["ignored_loader_tensors"]
     assert load_file(output / "layer_000.safetensors")["weight"].device.type == "cpu"
     assert not (output / "spool").exists()
     assert (output / "manifest.json").is_file()

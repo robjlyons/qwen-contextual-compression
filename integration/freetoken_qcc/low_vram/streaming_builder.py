@@ -68,11 +68,27 @@ def expected_tensors(model) -> dict[str, ExpectedTensor]:
     return {name: ExpectedTensor(tuple(tensor.shape), tensor.dtype, tensor) for name, tensor in state.items()}
 
 
+def classify_loader_extra(name: str, tensor: torch.Tensor, expected: dict[str, ExpectedTensor]) -> str | None:
+    """Identify narrowly proven loader metadata absent from this runtime model."""
+    if name in expected:
+        return None
+    if (
+        name.endswith(".input_scale")
+        and tensor.device.type == "cpu"
+        and not tensor.is_meta
+        and tensor.numel() == 1
+        and tensor.dtype == torch.float32
+    ):
+        return "runtime-does-not-expose-input-scale"
+    return None
+
+
 def spool_normalized_weights(loaded, expected: dict[str, ExpectedTensor], building: Path, layer_count: int) -> dict:
     """Consume the loader exactly once and persist one tensor per spool file."""
     spool = building / "spool"
     spool.mkdir(parents=True, exist_ok=False)
-    entries, seen = [], set()
+    entries, seen, emitted_names = [], set(), set()
+    ignored_entries = []
     total_bytes = largest_bytes = 0
     print("QCC STREAM NORMALIZATION", flush=True)
     _memory_diagnostic("normalization-start")
@@ -80,14 +96,33 @@ def spool_normalized_weights(loaded, expected: dict[str, ExpectedTensor], buildi
         if not isinstance(item, tuple) or len(item) != 2:
             raise StreamBuildError(f"FreeToken loader emitted unsupported item {item!r}")
         name, tensor = item
-        if name in seen:
+        if name in emitted_names:
             raise StreamBuildError(f"Duplicate normalized state key: {name}")
-        if name not in expected:
-            raise StreamBuildError(f"Unexpected normalized state key: {name}")
         if not isinstance(tensor, torch.Tensor) or tensor.is_meta:
             raise StreamBuildError(f"Loader emitted invalid tensor for {name}")
         if tensor.device.type != "cpu":
             raise StreamBuildError(f"CPU preparation found {name} on {tensor.device}; refusing CUDA fallback")
+        emitted_names.add(name)
+        if name not in expected:
+            reason = classify_loader_extra(name, tensor, expected)
+            if reason is None:
+                raise StreamBuildError(f"Unexpected normalized state key: {name}")
+            byte_size = tensor.numel() * tensor.element_size()
+            ignored_entries.append({
+                "name": name,
+                "shape": list(tensor.shape),
+                "dtype": str(tensor.dtype),
+                "tensor_bytes": byte_size,
+                "reason": reason,
+            })
+            if len(ignored_entries) == 1:
+                print(
+                    "QCC STREAM LOADER-ONLY METADATA:\n"
+                    f"ignoring {name}\nreason={reason}",
+                    flush=True,
+                )
+            del tensor, item
+            continue
         group, layer_id, relative = classify_key(name, layer_count)
         filename = f"{sequence:06d}.safetensors"
         contiguous = tensor.detach().contiguous()
@@ -113,11 +148,22 @@ def spool_normalized_weights(loaded, expected: dict[str, ExpectedTensor], buildi
     missing = set(expected) - seen
     if missing:
         raise StreamBuildError(f"Missing {len(missing)} expected normalized keys: {sorted(missing)[:8]}")
+    reason_counts = {}
+    for entry in ignored_entries:
+        reason = entry["reason"]
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+    ignored = {
+        "count": len(ignored_entries),
+        "tensor_bytes": sum(entry["tensor_bytes"] for entry in ignored_entries),
+        "reason_counts": reason_counts,
+        "entries": ignored_entries,
+    }
     index = {
         "entries": entries,
         "tensor_count": len(entries),
         "tensor_bytes": total_bytes,
         "largest_tensor_bytes": largest_bytes,
+        "ignored_loader_tensors": ignored,
     }
     (building / "spool_index.json").write_text(json.dumps(index, indent=2, sort_keys=True), encoding="utf-8")
     category_summary = {}
@@ -127,6 +173,11 @@ def spool_normalized_weights(loaded, expected: dict[str, ExpectedTensor], buildi
         summary["tensor_count"] += 1
         summary["tensor_bytes"] += entry["tensor_bytes"]
     print(f"normalized tensors: {len(entries)}; normalized GiB: {total_bytes / 2**30:.3f}; spool GiB: {total_bytes / 2**30:.3f}", flush=True)
+    print(
+        f"ignored loader tensors: {ignored['count']}; ignored loader bytes: {ignored['tensor_bytes']}; "
+        f"reason counts: {json.dumps(reason_counts, sort_keys=True)}",
+        flush=True,
+    )
     print("QCC STREAM NORMALIZATION GROUPS: " + json.dumps(category_summary, sort_keys=True), flush=True)
     _memory_diagnostic("normalization-complete", spool_bytes=total_bytes, largest_normalized_tensor=largest_bytes)
     return index
@@ -181,7 +232,8 @@ def _relative_finalized_state(layer, layer_id: int) -> dict[str, torch.Tensor]:
     return result
 
 
-def _build_manifest(records, source_model, source_revision, freetoken_version, adapter_fingerprint, nvfp4_count):
+def _build_manifest(records, source_model, source_revision, freetoken_version, adapter_fingerprint, nvfp4_count,
+                    ignored_loader_tensors):
     embedding_record, resident_record, layer_records = records
     all_records = [embedding_record, resident_record, *layer_records]
     dtype_counts = {}
@@ -202,6 +254,7 @@ def _build_manifest(records, source_model, source_revision, freetoken_version, a
         "tensor_count": sum(record["tensor_count"] for record in all_records),
         "tensor_bytes": sum(record["tensor_bytes"] for record in all_records),
         "file_bytes": sum(record["file_bytes"] for record in all_records),
+        "ignored_loader_tensors": ignored_loader_tensors,
         "embedding": embedding_record,
         "resident": resident_record,
         "layers": layer_records,
@@ -280,7 +333,8 @@ def build_stream_cache_streaming(model, loaded, output: Path, source_model: str,
                 _memory_diagnostic(f"after-layer-{layer_id:02d}", largest_finalized_layer=largest_layer)
 
         manifest = _build_manifest((embedding_record, resident_record, layer_records), source_model,
-                                   source_revision, freetoken_version, adapter_fingerprint, nvfp4_count)
+                                   source_revision, freetoken_version, adapter_fingerprint, nvfp4_count,
+                                   index["ignored_loader_tensors"])
         (building / "freetoken_contract.json").write_text(json.dumps(contract, indent=2, sort_keys=True), encoding="utf-8")
         manifest_temporary = building / "manifest.json.tmp"
         manifest_temporary.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
