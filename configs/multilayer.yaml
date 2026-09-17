@@ -1,0 +1,12 @@
+model: Qwen/Qwen3.8-27B
+layers: [0, 8, 16, 24, 32, 40, 48, 56, 63]
+max_tokens_per_layer: 2000
+calibration_fraction: 0.8
+activation_dtype: fp16
+evaluation_dtype: bfloat16
+retention: [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.75, 1.00]
+importance: weighted_activation
+shard_strategy: one_prompt_per_shard
+min_report_samples: 1000
+bootstrap_resamples: 500
+seed: 42
