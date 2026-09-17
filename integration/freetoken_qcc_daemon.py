@@ -137,7 +137,17 @@ def windows_signal_tree(pid: int, sig, *, run=None, process_exists=None):
     if forced:
         command.append("/F")
     completed = run(command, capture_output=True, text=True, check=False)
-    if completed.returncode == 0 or not process_exists(int(pid)):
+    if completed.returncode == 0:
+        return None
+    if not process_exists(int(pid)):
+        return None
+    if not forced:
+        print(
+            "QCC WINDOWS GRACEFUL TREE SIGNAL UNSUPPORTED: "
+            f"pid={pid} rc={completed.returncode}; "
+            "allowing FreeToken grace-period escalation",
+            flush=True,
+        )
         return None
     raise subprocess.CalledProcessError(
         completed.returncode, command, output=completed.stdout, stderr=completed.stderr

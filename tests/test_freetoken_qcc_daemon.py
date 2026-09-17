@@ -128,6 +128,48 @@ def test_windows_tree_shutdown_targets_only_owned_pid(sig, expected):
     assert calls[0][0].count("4321") == 1
 
 
+def test_graceful_tree_signal_failure_while_alive_allows_escalation(capsys):
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=128, stdout="", stderr="unsupported")
+
+    daemon.windows_signal_tree(
+        4321, signal.SIGTERM, run=run, process_exists=lambda pid: True
+    )
+    assert calls == [["taskkill", "/PID", "4321", "/T"]]
+    assert "/F" not in calls[0]
+    output = capsys.readouterr().out
+    assert "QCC WINDOWS GRACEFUL TREE SIGNAL UNSUPPORTED" in output
+    assert "pid=4321 rc=128" in output
+    assert "allowing FreeToken grace-period escalation" in output
+
+
+def test_forced_tree_signal_failure_while_alive_still_raises():
+    result = SimpleNamespace(returncode=128, stdout="", stderr="access denied")
+    with pytest.raises(subprocess.CalledProcessError) as error:
+        daemon.windows_signal_tree(
+            4321,
+            9,
+            run=lambda *args, **kwargs: result,
+            process_exists=lambda pid: True,
+        )
+    assert error.value.cmd == ["taskkill", "/PID", "4321", "/T", "/F"]
+    assert error.value.returncode == 128
+
+
+@pytest.mark.parametrize("sig", [signal.SIGTERM, 9])
+def test_failed_tree_signal_after_process_vanished_is_success(sig):
+    result = SimpleNamespace(returncode=128, stdout="not found", stderr="")
+    daemon.windows_signal_tree(
+        4321,
+        sig,
+        run=lambda *args, **kwargs: result,
+        process_exists=lambda pid: False,
+    )
+
+
 def test_non_windows_lifecycle_symbol_is_untouched():
     calls = []
 
@@ -155,16 +197,6 @@ def test_non_windows_signal_compat_does_not_mutate_signal_module():
     before = vars(fake).copy()
     assert daemon.ensure_windows_signal_compat(platform="linux", signal_module=fake) == 9
     assert vars(fake) == before
-
-
-def test_already_vanished_windows_process_is_success():
-    result = SimpleNamespace(returncode=128, stdout="not found", stderr="")
-    daemon.windows_signal_tree(
-        99,
-        signal.SIGTERM,
-        run=lambda *args, **kwargs: result,
-        process_exists=lambda pid: False,
-    )
 
 
 def test_missing_daemon_symbols_fail_clearly():
