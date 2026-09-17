@@ -98,6 +98,9 @@ class FreeTokenLowVRAMAdapter:
         self.bridge = None
         self.original_engine_loader = None
         self.original_model_loader = None
+        self.original_finalize_quant = None
+        self.engine_module = None
+        self.model_class = None
 
     def install(self):
         if int(os.environ.get("WORLD_SIZE", os.environ.get("TP_SIZE", "1"))) != 1:
@@ -110,8 +113,14 @@ class FreeTokenLowVRAMAdapter:
         loader = getattr(engine_module.Engine, "_load_weight_state_dict", None)
         if not callable(loader):
             raise LowVRAMCompatibilityError("Installed Engine lacks _load_weight_state_dict")
+        finalize_quant = getattr(engine_module, "finalize_quant", None)
+        if finalize_quant is not None and not callable(finalize_quant):
+            raise LowVRAMCompatibilityError("Installed Engine finalize_quant symbol is not callable")
+        self.engine_module = engine_module
+        self.model_class = model_class
         self.original_engine_loader = loader
         self.original_model_loader = model_class.load_state_dict
+        self.original_finalize_quant = finalize_quant
         adapter = self
 
         def suppress_full_cuda_loader(engine, *args, **kwargs):
@@ -125,8 +134,27 @@ class FreeTokenLowVRAMAdapter:
             adapter.install_model(model)
             return None
 
+        def guarded_finalize_quant(root, *args, **kwargs):
+            bridge = getattr(root, "_qcc_low_vram_bridge", None)
+            if bridge is not None:
+                representation = adapter.store.manifest.get("representation")
+                if representation != REPRESENTATION:
+                    raise LowVRAMCompatibilityError(
+                        "Refusing to skip finalize_quant for a non-finalized cache"
+                    )
+                print(
+                    "QCC LOW-VRAM FINALIZE_QUANT SKIPPED:\n"
+                    "cache already contains finalized runtime tensors",
+                    flush=True,
+                )
+                return 0
+            return adapter.original_finalize_quant(root, *args, **kwargs)
+
         engine_module.Engine._load_weight_state_dict = suppress_full_cuda_loader
         model_class.load_state_dict = install_cache
+        if finalize_quant is not None:
+            engine_module.finalize_quant = guarded_finalize_quant
+            print("QCC LOW-VRAM FINALIZE_QUANT GUARD INSTALLED", flush=True)
         return self
 
     def install_model(self, model):
@@ -156,6 +184,14 @@ class FreeTokenLowVRAMAdapter:
     def close(self):
         if self.bridge is not None:
             self.bridge.close()
+            self.bridge = None
+        if self.engine_module is not None:
+            if self.original_engine_loader is not None:
+                self.engine_module.Engine._load_weight_state_dict = self.original_engine_loader
+            if self.original_finalize_quant is not None:
+                self.engine_module.finalize_quant = self.original_finalize_quant
+        if self.model_class is not None and self.original_model_loader is not None:
+            self.model_class.load_state_dict = self.original_model_loader
 
 
 def install_low_vram_adapter(config, expected_model=None):
