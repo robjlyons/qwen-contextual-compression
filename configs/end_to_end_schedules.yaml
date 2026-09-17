@@ -1,0 +1,30 @@
+dense:
+  type: uniform
+  retention: 1.0
+measured_conservative: &measured_conservative
+  type: measured_only
+  default_retention: 1.0
+  layers: {0: 0.50, 8: 0.75, 16: 0.75, 24: 0.75, 32: 0.75, 40: 0.75, 48: 0.75, 56: 0.75, 63: 0.50}
+measured_moderate: &measured_moderate
+  type: measured_only
+  default_retention: 1.0
+  layers: {0: 0.30, 8: 0.50, 16: 0.50, 24: 0.60, 32: 0.60, 40: 0.60, 48: 0.60, 56: 0.60, 63: 0.30}
+measured_aggressive:
+  type: measured_only
+  default_retention: 1.0
+  layers: {0: 0.20, 8: 0.40, 16: 0.40, 24: 0.50, 32: 0.50, 40: 0.50, 48: 0.50, 56: 0.50, 63: 0.30}
+all_conservative:
+  type: interpolated
+  interpolation: linear
+  knots: {0: 0.50, 8: 0.75, 16: 0.75, 24: 0.75, 32: 0.75, 40: 0.75, 48: 0.75, 56: 0.75, 63: 0.50}
+all_moderate:
+  type: interpolated
+  interpolation: linear
+  knots: {0: 0.30, 8: 0.50, 16: 0.50, 24: 0.60, 32: 0.60, 40: 0.60, 48: 0.60, 56: 0.60, 63: 0.30}
+all_aggressive:
+  type: interpolated
+  interpolation: linear
+  knots: {0: 0.20, 8: 0.40, 16: 0.40, 24: 0.50, 32: 0.50, 40: 0.50, 48: 0.50, 56: 0.50, 63: 0.30}
+uniform_75: {type: uniform, retention: 0.75}
+uniform_60: {type: uniform, retention: 0.60}
+uniform_50: {type: uniform, retention: 0.50}
