@@ -31,6 +31,17 @@ def required_daemon_model(environ=None) -> str:
     return model
 
 
+def ensure_windows_signal_compat(*, platform=None, signal_module=None) -> int:
+    """Provide the daemon's logical forced-stop marker on native Windows."""
+    platform = sys.platform if platform is None else platform
+    signal_module = signal if signal_module is None else signal_module
+    if platform != "win32":
+        return int(getattr(signal_module, "SIGKILL", 9))
+    if not hasattr(signal_module, "SIGKILL"):
+        setattr(signal_module, "SIGKILL", 9)
+    return int(signal_module.SIGKILL)
+
+
 def configure_windows_triton_compiler(*, platform=None, environ=None, find_spec=None) -> str | None:
     """Select bundled TinyCC without importing Triton or changing global user state."""
     platform = sys.platform if platform is None else platform
@@ -120,7 +131,8 @@ def windows_signal_tree(pid: int, sig, *, run=None, process_exists=None):
     """Signal exactly one daemon-owned Windows process tree with taskkill."""
     run = subprocess.run if run is None else run
     process_exists = _process_exists if process_exists is None else process_exists
-    forced = sig in (signal.SIGKILL, 9)
+    kill_signal = getattr(signal, "SIGKILL", 9)
+    forced = int(sig) in {int(kill_signal), 9}
     command = ["taskkill", "/PID", str(int(pid)), "/T"]
     if forced:
         command.append("/F")
@@ -167,6 +179,7 @@ def _daemon_main(server_module, argv):
 
 def main(argv=None):
     model = required_daemon_model()
+    ensure_windows_signal_compat()
     configure_windows_triton_compiler()
     install_qcc_serve_command_hook(model)
     install_windows_process_tree_hook()

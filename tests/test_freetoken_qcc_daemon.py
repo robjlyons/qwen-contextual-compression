@@ -112,7 +112,7 @@ def test_windows_tinycc_is_auto_selected_without_importing_triton(tmp_path, caps
     "sig, expected",
     [
         (signal.SIGTERM, ["taskkill", "/PID", "4321", "/T"]),
-        (signal.SIGKILL, ["taskkill", "/PID", "4321", "/T", "/F"]),
+        (9, ["taskkill", "/PID", "4321", "/T", "/F"]),
     ],
 )
 def test_windows_tree_shutdown_targets_only_owned_pid(sig, expected):
@@ -141,6 +141,20 @@ def test_non_windows_lifecycle_symbol_is_untouched():
     assert module.signal_group is original
     assert module.signal_group(10, signal.SIGTERM) == "delegated"
     assert calls == [(10, signal.SIGTERM)]
+
+
+def test_windows_signal_compat_adds_missing_sigkill_marker():
+    fake = SimpleNamespace(SIGTERM=15)
+    result = daemon.ensure_windows_signal_compat(platform="win32", signal_module=fake)
+    assert result == 9
+    assert fake.SIGKILL == 9
+
+
+def test_non_windows_signal_compat_does_not_mutate_signal_module():
+    fake = SimpleNamespace(SIGTERM=15)
+    before = vars(fake).copy()
+    assert daemon.ensure_windows_signal_compat(platform="linux", signal_module=fake) == 9
+    assert vars(fake) == before
 
 
 def test_already_vanished_windows_process_is_success():
