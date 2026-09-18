@@ -132,6 +132,134 @@ def test_non_qcc_model_delegates_unchanged(tmp_path):
     assert result[0][2:4] == ["freetoken.cli", "serve"]
 
 
+SAFE_PROFILE = {
+    "--gpu": "0",
+    "--max-running-requests": "1",
+    "--cuda-graph-max-bs": "0",
+    "--memory-ratio": "0.88",
+    "--num-tokens": "256",
+    "--max-seq-len-override": "256",
+    "--max-output-tokens": "64",
+    "--max-prefill-length": "256",
+}
+
+
+def _assert_safe_profile(command):
+    for flag, value in SAFE_PROFILE.items():
+        assert command.count(flag) == 1
+        assert command[command.index(flag) + 1] == value
+
+
+def test_low_vram_hub_model_replaces_desktop_defaults_and_preserves_other_args(
+    tmp_path, capsys
+):
+    module = SimpleNamespace(build_serve_command=_original_builder)
+    cors = "tauri://localhost,http://tauri.localhost,http://localhost:1420"
+    caller_args = [
+        "--max-running-requests",
+        "4",
+        "--memory-ratio",
+        "0.85",
+        "--host",
+        "127.0.0.1",
+        "--cors-origins",
+        cors,
+    ]
+    daemon.install_qcc_serve_command_hook(
+        "RadixArk/Qwen3.8-27B-NVFP4",
+        module,
+        environ={"QCC_FT_LOW_VRAM": "1"},
+    )
+
+    command = module.build_serve_command(
+        "RadixArk/Qwen3.8-27B-NVFP4",
+        1919,
+        caller_args,
+        python="python.exe",
+        log_dir=str(tmp_path),
+    )[0]
+
+    _assert_safe_profile(command)
+    assert "4" not in command
+    assert "0.85" not in command
+    assert command[command.index("--host") + 1] == "127.0.0.1"
+    assert command[command.index("--cors-origins") + 1] == cors
+    assert caller_args[1:4:2] == ["4", "0.85"]
+    assert "QCC FREETOKEN LOW-VRAM SERVE PROFILE" in capsys.readouterr().out
+
+
+def test_low_vram_exact_local_model_receives_safe_profile(tmp_path):
+    module = SimpleNamespace(build_serve_command=_original_builder)
+    daemon.install_qcc_serve_command_hook(
+        "RadixArk/Qwen3.8-27B-NVFP4",
+        module,
+        configured_local_path=LOCAL_MODEL,
+        platform="win32",
+        environ={"QCC_FT_LOW_VRAM": "1"},
+    )
+    command = _route_command(module, LOCAL_MODEL, tmp_path)
+    _assert_safe_profile(command)
+    assert command[command.index("--model") + 1] == LOCAL_MODEL
+
+
+def test_low_vram_profile_removes_equals_form_before_inserting_once():
+    normalized = daemon.normalize_low_vram_serve_args(
+        ["--gpu=2", "--num-tokens=1024", "--host", "127.0.0.1"]
+    )
+    _assert_safe_profile(normalized)
+    assert "--gpu=2" not in normalized
+    assert "--num-tokens=1024" not in normalized
+
+
+def test_qcc_model_without_low_vram_keeps_caller_arguments(tmp_path, capsys):
+    module = SimpleNamespace(build_serve_command=_original_builder)
+    caller_args = ["--max-running-requests", "4", "--memory-ratio", "0.85"]
+    daemon.install_qcc_serve_command_hook(
+        "RadixArk/Qwen3.8-27B-NVFP4",
+        module,
+        environ={"QCC_FT_LOW_VRAM": "0"},
+    )
+    command = module.build_serve_command(
+        "RadixArk/Qwen3.8-27B-NVFP4",
+        1919,
+        caller_args,
+        python="python.exe",
+        log_dir=str(tmp_path),
+    )[0]
+    assert command[-len(caller_args) :] == caller_args
+    assert "--cuda-graph-max-bs" not in command
+    assert "LOW-VRAM SERVE PROFILE" not in capsys.readouterr().out
+
+
+def test_unrelated_model_is_not_normalized_when_low_vram_is_enabled(tmp_path, capsys):
+    calls = []
+
+    def original(model, port, args, *, python, log_dir):
+        calls.append(list(args))
+        return _original_builder(model, port, args, python=python, log_dir=log_dir)
+
+    module = SimpleNamespace(build_serve_command=original)
+    caller_args = ["--max-running-requests", "4", "--memory-ratio", "0.85"]
+    daemon.install_qcc_serve_command_hook(
+        "RadixArk/Qwen3.8-27B-NVFP4",
+        module,
+        configured_local_path=LOCAL_MODEL,
+        platform="win32",
+        environ={"QCC_FT_LOW_VRAM": "1"},
+    )
+    command = module.build_serve_command(
+        r"C:\other\Qwen3.8-27B-NVFP4",
+        1919,
+        caller_args,
+        python="python.exe",
+        log_dir=str(tmp_path),
+    )[0]
+    assert calls == [caller_args]
+    assert command[-len(caller_args) :] == caller_args
+    assert "--cuda-graph-max-bs" not in command
+    assert "LOW-VRAM SERVE PROFILE" not in capsys.readouterr().out
+
+
 def test_daemon_module_and_hooks_are_torch_free(tmp_path):
     script = r'''
 import sys

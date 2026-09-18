@@ -19,6 +19,16 @@ from integration.freetoken_qcc_identity import (
 
 
 QCC_LAUNCH_MODULE = "integration.freetoken_qcc.launch"
+LOW_VRAM_SERVE_PROFILE = (
+    ("--gpu", "0"),
+    ("--max-running-requests", "1"),
+    ("--cuda-graph-max-bs", "0"),
+    ("--memory-ratio", "0.88"),
+    ("--num-tokens", "256"),
+    ("--max-seq-len-override", "256"),
+    ("--max-output-tokens", "64"),
+    ("--max-prefill-length", "256"),
+)
 
 
 class QCCDaemonCompatibilityError(RuntimeError):
@@ -79,6 +89,53 @@ def _normalized_model_path(path: str, platform: str) -> str:
     return normalized_model_path(path, platform=platform)
 
 
+def normalize_low_vram_serve_args(args) -> list[str]:
+    """Replace QCC-owned serve options while preserving every unrelated argument."""
+    controlled = {flag for flag, _ in LOW_VRAM_SERVE_PROFILE}
+    normalized = []
+    index = 0
+    args = list(args)
+    while index < len(args):
+        argument = args[index]
+        matching_flag = next(
+            (flag for flag in controlled if argument == flag or argument.startswith(f"{flag}=")),
+            None,
+        )
+        if matching_flag is None:
+            normalized.append(argument)
+            index += 1
+            continue
+        if argument == matching_flag:
+            if index + 1 >= len(args) or args[index + 1].startswith("--"):
+                raise _compatibility_error(f"{matching_flag} is missing its value")
+            index += 2
+        else:
+            index += 1
+
+    for flag, value in LOW_VRAM_SERVE_PROFILE:
+        normalized.extend((flag, value))
+    return normalized
+
+
+def _low_vram_enabled(environ) -> bool:
+    return environ.get("QCC_FT_LOW_VRAM", "0").strip().lower() in {"1", "true"}
+
+
+def _print_low_vram_serve_profile() -> None:
+    print(
+        "QCC FREETOKEN LOW-VRAM SERVE PROFILE:\n"
+        "max_running_requests=1\n"
+        "cuda_graph_max_bs=0\n"
+        "num_tokens=256\n"
+        "max_seq_len=256\n"
+        "max_output_tokens=64\n"
+        "max_prefill_length=256\n"
+        "memory_ratio=0.88\n"
+        "gpu=0",
+        flush=True,
+    )
+
+
 def install_qcc_serve_command_hook(
     expected_model=None,
     serve_manager_module=None,
@@ -116,6 +173,9 @@ def install_qcc_serve_command_hook(
         python = values["python"]
         port = values["port"]
         extra_args = values["args"]
+        if _low_vram_enabled(environ):
+            extra_args = normalize_low_vram_serve_args(extra_args)
+            _print_low_vram_serve_profile()
         log_dir = values["log_dir"]
         print(
             "QCC FREETOKEN DAEMON:\n"
