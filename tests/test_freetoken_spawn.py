@@ -141,3 +141,52 @@ def test_worker_installs_low_vram_adapter_when_sparse_mode_is_off(monkeypatch, t
     monkeypatch.setattr(worker_module.importlib, "import_module", lambda name: SimpleNamespace(_run_scheduler=lambda args, queue: events.append("scheduler")))
     qcc_scheduler_entry(SimpleNamespace(model="fake/model"), None)
     assert events == [("low_install", "fake/model"), "scheduler", "low_close"]
+
+
+def test_worker_uses_canonical_cache_identity_without_mutating_launch_path(
+    monkeypatch, tmp_path, capsys
+):
+    import integration.freetoken_qcc.low_vram.adapter as adapter_module
+    import integration.freetoken_qcc.worker as worker_module
+
+    canonical = "RadixArk/Qwen3.8-27B-NVFP4"
+    local_path = r"G:\freetoken\models\Qwen3.8-27B-NVFP4"
+    monkeypatch.setenv("QCC_FT_MODE", "off")
+    monkeypatch.setenv("QCC_FT_LOW_VRAM", "1")
+    monkeypatch.setenv("QCC_FT_STREAM_CACHE", str(tmp_path))
+    monkeypatch.setenv("QCC_FT_DAEMON_MODEL", canonical)
+    monkeypatch.setenv("QCC_FT_DAEMON_MODEL_PATH", local_path)
+    observed = {}
+    fake_adapter = SimpleNamespace(close=lambda: None)
+
+    def install_adapter(config, expected_model=None):
+        observed["cache_source_model"] = expected_model
+        return fake_adapter
+
+    monkeypatch.setattr(
+        adapter_module,
+        "install_low_vram_adapter",
+        install_adapter,
+    )
+    args = SimpleNamespace(model_path=local_path)
+
+    def scheduler(received_args, queue):
+        observed["launch_model"] = received_args.model_path
+
+    monkeypatch.setattr(
+        worker_module.importlib,
+        "import_module",
+        lambda name: SimpleNamespace(_run_scheduler=scheduler),
+    )
+
+    qcc_scheduler_entry(args, None)
+
+    assert observed == {
+        "cache_source_model": canonical,
+        "launch_model": local_path,
+    }
+    assert args.model_path == local_path
+    output = capsys.readouterr().out
+    assert f"launch_model={local_path}" in output
+    assert f"cache_source_model={canonical}" in output
+    assert "alias=local-configured-path" in output

@@ -5,6 +5,8 @@ import importlib
 import json
 import os
 
+from integration.freetoken_qcc_identity import resolve_cache_model_identity
+
 
 class FreeTokenIntegrationVersionError(RuntimeError):
     """Raised when FreeToken no longer exposes the scheduler hook used by QCC."""
@@ -22,8 +24,21 @@ def qcc_scheduler_entry(args, ack_queue):
         raise RuntimeError("QCC scheduler worker requires sparse QCC or low-VRAM mode")
 
     bridge = install_patch(config) if config.mode != "off" else None
-    expected_model = getattr(args, "model", None) or getattr(args, "model_path", None)
-    low_vram_adapter = install_low_vram_adapter(low_vram, expected_model) if low_vram.enabled else None
+    launch_model = getattr(args, "model", None) or getattr(args, "model_path", None)
+    identity = resolve_cache_model_identity(launch_model)
+    if low_vram.enabled:
+        print(
+            "QCC LOW-VRAM MODEL IDENTITY:\n"
+            f"launch_model={identity.launch_model}\n"
+            f"cache_source_model={identity.cache_source_model}\n"
+            f"alias={identity.alias}",
+            flush=True,
+        )
+    low_vram_adapter = (
+        install_low_vram_adapter(low_vram, identity.cache_source_model)
+        if low_vram.enabled
+        else None
+    )
     try:
         # Under multiprocessing spawn this is a fresh interpreter, so this
         # import resolves FreeToken's unmodified scheduler. The identity guard

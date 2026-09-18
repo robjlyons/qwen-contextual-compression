@@ -4,17 +4,21 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import inspect
-import ntpath
 import os
 import signal
 import subprocess
 import sys
 from pathlib import Path
 
+from integration.freetoken_qcc_identity import (
+    QCC_MODEL_ENV,
+    QCC_MODEL_PATH_ENV,
+    is_qcc_model,
+    normalized_model_path,
+)
+
 
 QCC_LAUNCH_MODULE = "integration.freetoken_qcc.launch"
-QCC_MODEL_ENV = "QCC_FT_DAEMON_MODEL"
-QCC_MODEL_PATH_ENV = "QCC_FT_DAEMON_MODEL_PATH"
 
 
 class QCCDaemonCompatibilityError(RuntimeError):
@@ -71,18 +75,8 @@ def configure_windows_triton_compiler(*, platform=None, environ=None, find_spec=
 
 
 def _normalized_model_path(path: str, platform: str) -> str:
-    path_module = ntpath if platform == "win32" else os.path
-    return path_module.normcase(path_module.abspath(path))
-
-
-def is_qcc_model(model: str, expected_model: str, configured_local_path=None, *, platform=None) -> bool:
-    """Match only the configured Hub ID or exact configured local model path."""
-    if model == expected_model:
-        return True
-    if not configured_local_path:
-        return False
-    platform = sys.platform if platform is None else platform
-    return _normalized_model_path(model, platform) == _normalized_model_path(configured_local_path, platform)
+    """Backward-compatible daemon facade over the shared path semantics."""
+    return normalized_model_path(path, platform=platform)
 
 
 def install_qcc_serve_command_hook(
